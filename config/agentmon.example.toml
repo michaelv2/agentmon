@@ -1,0 +1,67 @@
+# agentmon configuration example
+# Copy to agentmon.toml and customize
+
+[database]
+path = "~/.local/share/agentmon/events.db"
+
+[pihole]
+# Local database path (if Pi-hole is on the same machine or mounted)
+# db_path = "/etc/pihole/pihole-FTL.db"
+
+# Remote Pi-hole via SSH
+ssh_host = "pihole.local"
+ssh_user = "pi"
+# ssh_key_path = "~/.ssh/id_ed25519"
+remote_db_path = "/etc/pihole/pihole-FTL.db"
+
+batch_size = 1000
+
+[analyzer]
+# Entropy threshold for DGA detection (higher = fewer false positives)
+entropy_threshold = 3.5
+
+# Minimum domain length to consider for entropy analysis
+entropy_min_length = 10
+
+# Learning mode: only build baseline, don't generate alerts
+learning_mode = false
+
+# Known-bad domain patterns (substring match)
+known_bad_patterns = [
+    "malware",
+    "c2server",
+    # Add your own patterns here
+]
+
+# Domains to always ignore (exact match)
+allowlist = [
+    "localhost",
+    # Add trusted domains here
+]
+
+# Domain suffixes to ignore
+ignore_suffixes = [
+    ".local",
+    ".lan",
+    ".home",
+    ".internal",
+    ".localdomain",
+    ".arpa",
+]
+
+[llm]
+# Local LLM endpoint for domain classification
+local_endpoint = "http://localhost:8080/v1"
+local_model = "llama3.3-70b"
+
+# Frontier API for escalated analysis (optional)
+# frontier_api_key = ""  # Set via AGENTMON_FRONTIER_API_KEY env var
+# frontier_model = "claude-sonnet-4-20250514"
+
+[alerting]
+# Minimum severity to alert on
+min_severity = "low"  # info, low, medium, high, critical
+
+# Future: webhook, email, ntfy integration
+# webhook_url = ""
+# ntfy_topic = ""

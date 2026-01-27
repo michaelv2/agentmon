@@ -1,0 +1,191 @@
+agentmon - Network Agent Activity Monitor and Auditor
+=====================================================
+
+Last updated: 2026-01-26
+
+IMPLEMENTATION STATUS
+---------------------
+Phase 1: IN PROGRESS (core scaffolding complete)
+Phase 2: NOT STARTED
+Phase 3: NOT STARTED
+Phase 4: NOT STARTED
+
+INFRASTRUCTURE
+--------------
+- Pi-hole: Raspberry Pi 2 (DNS logs at /var/log/pihole/pihole.log)
+- OpenWRT: Raspberry Pi 4 Compute Module (connection tracking)
+- LLM Server: 2x 3090 GPUs, runs agentmon hub
+  - Local models: Llama 3.3 70B, gpt-120b OSS
+  - Escalation: Frontier APIs available
+- Target hosts: macOS, Windows + WSL2, IoT (passive only)
+
+ARCHITECTURE OVERVIEW
+---------------------
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        agentmon                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
+│  │  Collectors │  │  Collectors │  │  Collectors │             │
+│  │  (Phase 1)  │  │  (Phase 2)  │  │  (Phase 3)  │             │
+│  ├─────────────┤  ├─────────────┤  ├─────────────┤             │
+│  │ Pi-hole DNS │  │ OpenWRT     │  │ Host Agent  │             │
+│  │ [DONE]      │  │ conntrack   │  │ (processes, │             │
+│  │             │  │ firewall    │  │  sockets)   │             │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘             │
+│         │                │                │                     │
+│         └────────────────┼────────────────┘                     │
+│                          ▼                                      │
+│              ┌───────────────────────┐                          │
+│              │   Normalization Layer │                          │
+│              │   [DONE - models/]    │                          │
+│              └───────────┬───────────┘                          │
+│                          ▼                                      │
+│              ┌───────────────────────┐                          │
+│              │   Storage/Index       │                          │
+│              │   [DONE - DuckDB]     │                          │
+│              └───────────┬───────────┘                          │
+│                          ▼                                      │
+│              ┌───────────────────────┐                          │
+│              │   Analysis Engine     │                          │
+│              ├───────────────────────┤                          │
+│              │ • Baseline learning   │ [DONE]                   │
+│              │ • Anomaly detection   │ [DONE - entropy/DGA]     │
+│              │ • Known-bad patterns  │ [DONE - configurable]    │
+│              │ • LLM classification  │ [STUB - needs wiring]    │
+│              │ • Authority checker   │ [Phase 3]                │
+│              └───────────┬───────────┘                          │
+│                          ▼                                      │
+│              ┌───────────────────────┐                          │
+│              │   Alerting/Reports    │                          │
+│              │   [DONE - CLI only]   │                          │
+│              └───────────────────────┘                          │
+└─────────────────────────────────────────────────────────────────┘
+
+TIERED LLM ANALYSIS
+-------------------
+Tier 0: Rules/entropy         - DGA scoring, known-bad lists (<1ms)
+Tier 1: Local 70B (Llama 3.3) - Domain classification, batch triage (~1-2s)
+Tier 2: Frontier API          - Escalated alerts, complex reasoning (~3-5s)
+
+PHASE 1: Pi-hole DNS Auditing [IN PROGRESS]
+-------------------------------------------
+Goal: Establish baseline DNS behavior, flag anomalies
+
+Implemented:
+  [x] FTL database collector (collectors/pihole.py)
+  [x] Log file collector (collectors/pihole_log.py)
+  [x] Data models: DNSEvent, ConnectionEvent, ProcessNetworkEvent, Alert
+  [x] DuckDB storage with schema migrations
+  [x] Entropy/DGA detection (14 tests passing)
+  [x] DNS baseline analyzer (new domain detection, known-bad patterns)
+  [x] LLM classifier stub (needs endpoint configuration)
+  [x] CLI: collect, alerts, stats, baseline commands
+
+Not yet implemented:
+  [ ] Config file loading (TOML)
+  [ ] Scheduled collection (cron/systemd timer)
+  [ ] Real-time log streaming mode (tail -f style)
+  [ ] LLM endpoint wiring
+  [ ] Known-bad domain lists from threat intel feeds
+  [ ] Alerting outputs (webhook, ntfy, email)
+
+Detection capabilities:
+  - Domains not in historical baseline
+  - High-entropy/DGA-looking domains
+  - Known C2/telemetry domains (configurable blocklist)
+  - Per-client baseline tracking
+
+PHASE 2: OpenWRT Traffic Analysis [NOT STARTED]
+------------------------------------------------
+Goal: See connection patterns beyond just DNS
+
+Collector options:
+  - conntrack for connection tracking
+  - Firewall logs
+  - Optional: tcpdump samples or ntopng integration
+
+Normalize to: {timestamp, src_ip, src_port, dst_ip, dst_port,
+               protocol, bytes, duration}
+
+Detection goals:
+  - Connections to IPs with no preceding DNS lookup (direct IP access)
+  - Unusual destination ports (non-80/443)
+  - Long-lived connections (beaconing)
+  - Traffic to residential IPs or known cloud provider ranges
+  - Correlation: DNS query → connection timing
+
+PHASE 3: Host-Level Agent Monitoring [NOT STARTED]
+--------------------------------------------------
+Goal: Correlate network activity to specific processes
+
+Platforms:
+  - macOS: lsof -i, nettop, netstat (TCC permissions needed)
+  - Windows: Get-NetTCPConnection, ETW for deeper tracing
+  - WSL2: Monitor from Windows side (Hyper-V virtual NIC)
+  - IoT: No agent - network-only monitoring
+
+Authority Model:
+  - Config file defines allowed connections per process
+  - Example: {process: "claude-code", allowed: ["api.anthropic.com"]}
+  - Everything else flagged
+
+Detection goals:
+  - Process making connections not in its authority grant
+  - Unknown/unsigned binaries making network calls
+  - Process ancestry anomalies (unexpected parent spawning curl)
+
+PHASE 4: Correlation & Intelligence [NOT STARTED]
+-------------------------------------------------
+Goal: Cross-reference all data sources
+
+Features:
+  - Correlate: DNS query → OpenWRT connection → Host process
+  - Timeline reconstruction: "At 14:32, process X on host Y resolved
+    domain Z, then connected to IP W"
+  - Pattern detection: periodic beaconing, gradual data exfil
+  - Threat intel feed integration
+
+TECH STACK (Implemented)
+------------------------
+Language:       Python 3.11+ (strict typing for potential Rust migration)
+Storage:        DuckDB (analytical queries, column-oriented, single-file)
+Config:         TOML
+CLI:            Click + Rich
+HTTP:           httpx (for LLM API calls)
+SSH:            paramiko (for remote collection)
+Testing:        pytest
+
+PROJECT STRUCTURE
+-----------------
+agentmon/
+├── agentmon/
+│   ├── collectors/
+│   │   ├── pihole.py        # FTL database collector
+│   │   └── pihole_log.py    # Log file collector
+│   ├── analyzers/
+│   │   ├── entropy.py       # DGA/entropy detection
+│   │   └── dns_baseline.py  # Baseline anomaly detection
+│   ├── storage/
+│   │   └── db.py            # DuckDB storage layer
+│   ├── llm/
+│   │   └── classifier.py    # LLM domain classification
+│   ├── models/
+│   │   └── events.py        # Data models
+│   └── cli.py               # CLI entry point
+├── config/
+│   └── agentmon.example.toml
+├── tests/
+│   └── test_entropy.py      # 14 passing tests
+├── pyproject.toml
+├── SESSION.md               # Session state for resuming
+└── README.md
+
+NEXT STEPS
+----------
+1. Verify Pi-hole paths (FTL.db vs log file)
+2. Configure passwordless SSH to Pi-hole
+3. Run learning mode to build initial baseline
+4. Wire LLM classifier to local Llama 3.3 endpoint
+5. Add cron/systemd scheduling for periodic collection
