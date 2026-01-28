@@ -29,6 +29,26 @@ htmlcov/
 *.db
 events.db
 
+# Configuration files with secrets (keep only examples)
+agentmon.toml
+!config/agentmon.example.toml
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.crt
+*.csr
+
+# SSH known_hosts may contain infrastructure info
+known_hosts
+
 # OS
 .DS_Store
 Thumbs.db
+SESSION.md

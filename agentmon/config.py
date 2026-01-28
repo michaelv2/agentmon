@@ -4,6 +4,7 @@ Loads settings from TOML config file with CLI override support.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -14,6 +15,10 @@ from agentmon.models import Severity
 from agentmon.policies.models import Device, ParentalPolicy, TimeRule
 
 logger = logging.getLogger(__name__)
+
+# Environment variable names for sensitive settings
+ENV_SLACK_WEBHOOK = "AGENTMON_SLACK_WEBHOOK"
+ENV_OLLAMA_HOST = "OLLAMA_HOST"
 
 
 def get_default_config_path() -> Path:
@@ -201,6 +206,16 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.slack_webhook_url = slack["webhook_url"]
         if "min_severity" in slack:
             config.slack_min_severity = slack["min_severity"]
+
+    # Environment variable overrides for sensitive settings
+    # AGENTMON_SLACK_WEBHOOK takes precedence over config file
+    env_slack_webhook = os.environ.get(ENV_SLACK_WEBHOOK)
+    if env_slack_webhook:
+        config.slack_webhook_url = env_slack_webhook
+        # Auto-enable Slack if webhook is set via env var
+        if not config.slack_enabled:
+            logger.info(f"Slack enabled via {ENV_SLACK_WEBHOOK} environment variable")
+            config.slack_enabled = True
 
     # Parental Controls section
     if "parental_controls" in data:

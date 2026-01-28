@@ -24,7 +24,7 @@ Agentmon is a network monitoring tool that:
 
 ## Security Audit Status
 
-Last audit: 2025-01-28
+Last audit: 2026-01-28
 
 ### Fixed Issues
 
@@ -32,43 +32,14 @@ Last audit: 2025-01-28
 |----------|-------|-----|
 | CRITICAL | SQL f-string interpolation in time queries | Use datetime arithmetic with parameterized queries |
 | CRITICAL | Syslog default bind 0.0.0.0 | Changed default to 127.0.0.1 (localhost) |
+| CRITICAL | Missing .gitignore entries for secrets | Added exclusions for agentmon.toml, .env, keys, certs |
+| CRITICAL | SQL injection in SSH collector | Validate inputs + shlex.quote() for shell escaping |
 | HIGH | LLM prompt injection via domain names | Input sanitization + prompt hardening |
+| HIGH | No warning when binding to 0.0.0.0 | Added runtime security warning in CLI |
+| HIGH | Slack webhook in plaintext config | Support AGENTMON_SLACK_WEBHOOK env var override |
+| HIGH | ReDoS in syslog parser | Added MAX_SYSLOG_MESSAGE_LENGTH (8KB) limit |
 
 ### Known Issues (TODO)
-
-#### HIGH: SSH Command Injection
-
-**Location:** `agentmon/collectors/pihole.py:165`
-
-**Risk:** If an attacker controls the config file, they can inject shell commands that execute on the remote Pi-hole server via the `remote_db_path` setting.
-
-**Mitigation:** Use `shlex.quote()` for shell escaping:
-```python
-import shlex
-cmd = f'sqlite3 -separator "|" {shlex.quote(self.config.remote_db_path)} {shlex.quote(sql)}'
-```
-
-#### HIGH: Slack Webhook in Plaintext Config
-
-**Location:** `agentmon/config.py:74`
-
-**Risk:** Slack webhook URLs function as bearer tokens. Anyone with read access to config files can steal and misuse them.
-
-**Mitigation:** Support environment variable override:
-```bash
-export AGENTMON_SLACK_WEBHOOK="https://hooks.slack.com/services/..."
-```
-
-#### MEDIUM: ReDoS in Syslog Parser
-
-**Location:** `agentmon/collectors/syslog_receiver.py:27-46`
-
-**Risk:** Crafted syslog messages could cause catastrophic regex backtracking, consuming CPU.
-
-**Mitigation:**
-- Add message length limits before regex matching
-- Use more specific character classes instead of `\S+`
-- Test regexes with ReDoS detection tools
 
 #### MEDIUM: Database Path Traversal
 
@@ -91,6 +62,53 @@ ALLOWED_DB_DIRS = [
 **Risk:** Empty string or single-character patterns match all/most domains, causing alert floods.
 
 **Mitigation:** Reject patterns shorter than 2-3 characters.
+
+#### MEDIUM: Missing IP Validation for Allowlist
+
+**Location:** `agentmon/config.py:150-151`
+
+**Risk:** The configuration loader accepts `allowed_ips` without validating that entries are actually valid IP addresses. Invalid IPs (typos, malformed entries) would silently fail to match, effectively disabling the allowlist.
+
+**Mitigation:**
+```python
+import ipaddress
+
+for ip_str in raw_ips:
+    try:
+        ipaddress.ip_address(ip_str)
+        validated_ips.append(ip_str)
+    except ValueError:
+        logger.error(f"Invalid IP in allowed_ips: {ip_str} - ignoring")
+```
+
+#### MEDIUM: DuckDB Temporary File Exposure
+
+**Location:** `agentmon/storage/db.py:44-60`
+
+**Risk:** When opening a database in read-only mode and encountering a lock, the code copies the database to a temporary directory. The copied file may inherit overly permissive permissions, allowing other local users to read DNS query history on shared systems.
+
+**Mitigation:**
+```python
+import os
+import stat
+
+# After copying to temp directory
+os.chmod(self._temp_db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+```
+
+#### MEDIUM: Slack Webhook URL Logging Risk
+
+**Location:** `agentmon/notifiers/slack.py:112-126`
+
+**Risk:** Error handling logs response text and error messages. If the Slack API returns the webhook URL in an error message (e.g., 404), it could be logged and exposed to users with log access.
+
+**Mitigation:**
+```python
+# Sanitize response to avoid leaking webhook URL
+import re
+safe_response = re.sub(r'https?://[^\s]+', '[URL_REDACTED]', resp.text[:200])
+logger.warning(f"Slack webhook failed: {resp.status_code} - {safe_response}")
+```
 
 #### MEDIUM: Missing TLS for Syslog
 
@@ -125,6 +143,44 @@ ALLOWED_DB_DIRS = [
 **Risk:** Config modifications go undetected.
 
 **Mitigation:** Optional SHA256 checksum verification via `.toml.sha256` sidecar file.
+
+#### LOW: Unbounded Alert Deduplication Cache
+
+**Location:** `agentmon/analyzers/dns_baseline.py:79-82`
+
+**Risk:** The alert deduplication cache uses a fixed size (5000 entries). In high-traffic environments with many unique domain/client combinations, the cache could evict entries prematurely, causing duplicate alerts, or consume excessive memory if misconfigured.
+
+**Mitigation:** Make cache size configurable and add monitoring:
+```toml
+[analyzer]
+alert_dedup_cache_size = 10000  # Adjust based on network size
+```
+
+#### LOW: LLM Response Validation
+
+**Location:** `agentmon/llm/classifier.py:345-369`
+
+**Risk:** The `_parse_response` method doesn't strictly validate the JSON schema from LLM responses. Malformed responses could cause unexpected behavior or invalid classification results.
+
+**Mitigation:**
+- Validate confidence is in range [0, 1] and clamp if out of range
+- Limit reasoning field length (e.g., max 1000 chars)
+- Validate category is a known enum value
+
+#### LOW: Missing Database File Permissions
+
+**Location:** `agentmon/storage/db.py:40-42`
+
+**Risk:** The EventStore doesn't verify or set secure permissions on the DuckDB database file after creation. On shared systems, other users might read DNS query history which reveals browsing habits and network topology.
+
+**Mitigation:**
+```python
+import os
+import stat
+
+if self.db_path.exists():
+    os.chmod(self.db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+```
 
 ## Deployment Hardening
 

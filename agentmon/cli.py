@@ -409,6 +409,18 @@ def listen(
         allowed_ips=syslog_allowed,
     )
 
+    # Security warning: binding to all interfaces without IP allowlist
+    if syslog_bind in ("0.0.0.0", "::") and not syslog_allowed:
+        console.print(
+            "[yellow bold]SECURITY WARNING:[/yellow bold] "
+            "[yellow]Syslog receiver bound to all interfaces without IP allowlist![/yellow]"
+        )
+        console.print(
+            "[yellow]This exposes your system to the entire network. "
+            "Consider using --allow to restrict source IPs or --bind to bind to a specific interface.[/yellow]"
+        )
+        console.print()
+
     # Set up logging
     log_level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
@@ -628,6 +640,20 @@ def listen(
                 console.print(f"[yellow]Startup cleanup failed: {e}[/yellow]")
 
         console.print(f"[green]Starting syslog receiver on {syslog_bind}:{syslog_port} ({syslog_protocol})[/green]")
+
+        # Warn if retention is disabled and database is large
+        if not cfg.retention_enabled and db_path.exists():
+            db_size_mb = db_path.stat().st_size / (1024 * 1024)
+            if db_size_mb > 500:
+                console.print(
+                    f"[yellow bold]WARNING:[/yellow bold] "
+                    f"[yellow]Database is {db_size_mb:.0f}MB and retention policy is disabled.[/yellow]"
+                )
+                console.print(
+                    "[yellow]Consider enabling [retention] in config or running 'agentmon cleanup'.[/yellow]"
+                )
+                console.print()
+
         if use_learning:
             console.print("[cyan]Learning mode: building baseline only[/cyan]")
         if use_llm:

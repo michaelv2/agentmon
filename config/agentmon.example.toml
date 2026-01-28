@@ -157,6 +157,10 @@ enabled = false
 # Webhook URL from Slack App configuration
 # Create at: https://api.slack.com/apps → Incoming Webhooks
 # webhook_url = "https://hooks.slack.com/services/T.../B.../xxx"
+#
+# SECURITY: Prefer setting webhook via environment variable instead of config file:
+#   export AGENTMON_SLACK_WEBHOOK="https://hooks.slack.com/services/T.../B.../xxx"
+# Environment variable takes precedence over config file and auto-enables Slack.
 
 # Minimum severity to notify (info, low, medium, high, critical)
 min_severity = "medium"
@@ -308,13 +312,13 @@ strip_suffix = true
 # Use for devices that don't register hostnames via DHCP
 # These override DNS lookups
 
-[[client_resolver.mappings]]
-ip = "192.168.1.100"
-name = "media-server"
+# [[client_resolver.mappings]]
+# ip = "192.168.1.100"
+# name = "media-server"
 
-[[client_resolver.mappings]]
-ip = "192.168.1.101"
-name = "nas"
+# [[client_resolver.mappings]]
+# ip = "192.168.1.101"
+# name = "nas"
 
 # [[client_resolver.mappings]]
 # ip = "192.168.1.200"

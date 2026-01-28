@@ -307,7 +307,7 @@ See [SECURITY.md](SECURITY.md) for:
 
 ## Architecture Details
 
-See [SMART_ANALYZE.md](SMART_ANALYZE.md) for technical details on:
+See [SMART_ANALYZE.md](docs/SMART_ANALYZE.md) for technical details on:
 - Client identity resolution implementation
 - Device activity anomaly detection algorithm
 - Data retention policy design

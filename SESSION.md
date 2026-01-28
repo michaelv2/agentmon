@@ -38,6 +38,12 @@ Network agent activity monitor that detects anomalous DNS activity from AI agent
 - [x] Config file loading (TOML) with CLI override support
 - [x] CLI commands: `listen`, `collect`, `alerts`, `stats`, `baseline`, `cleanup`
 
+### Phase 1 (Infrastructure) - Not Started
+- [ ] Systemd service for agentmon hub - run as a daemon
+- [ ] Integration tests - end-to-end syslog → alert flow
+- [ ] Look for additional bad actor rule sources
+- [ ] Figure out what processes are hitting flagged domains
+
 ### Phase 2 (OpenWRT) - Not Started
 
 - [ ] OpenWRT conntrack collector

@@ -93,6 +93,11 @@ class SyslogConfig:
     buffer_size: int = 65535  # Max UDP packet size
 
 
+# Maximum syslog message size to prevent ReDoS attacks
+# RFC 5424 recommends 2048 bytes minimum, we allow up to 8KB to be generous
+MAX_SYSLOG_MESSAGE_LENGTH = 8192
+
+
 def parse_syslog_message(
     data: bytes,
     source_ip: str,
@@ -107,7 +112,19 @@ def parse_syslog_message(
 
     Returns:
         Parsed SyslogMessage or None if parsing fails
+
+    Security:
+        Enforces maximum message length to prevent ReDoS attacks via
+        crafted messages that cause catastrophic regex backtracking.
     """
+    # Security: Enforce maximum message size to prevent ReDoS
+    if len(data) > MAX_SYSLOG_MESSAGE_LENGTH:
+        logger.warning(
+            f"Oversized syslog message from {source_ip}: {len(data)} bytes "
+            f"(max {MAX_SYSLOG_MESSAGE_LENGTH}) - dropped"
+        )
+        return None
+
     try:
         text = data.decode("utf-8", errors="replace").strip()
     except Exception:

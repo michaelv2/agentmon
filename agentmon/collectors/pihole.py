@@ -5,6 +5,7 @@ Supports two collection methods:
 2. SSH + sqlite3 CLI for remote queries without mounting
 """
 
+import shlex
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -148,21 +149,39 @@ class PiholeCollector:
         client: "paramiko.SSHClient",
         since: Optional[datetime],
     ) -> Iterator[DNSEvent]:
-        """Query events via SSH using sqlite3 CLI."""
-        # Build the sqlite3 command
+        """Query events via SSH using sqlite3 CLI.
+
+        Security: All values are validated and shell-escaped to prevent
+        SQL injection and command injection attacks.
+        """
+        # Validate and sanitize inputs
         where_clause = ""
         if since is not None:
-            where_clause = f"WHERE timestamp > {since.timestamp()}"
+            # Validate timestamp is actually a float to prevent SQL injection
+            try:
+                timestamp_val = float(since.timestamp())
+            except (TypeError, ValueError, AttributeError) as e:
+                raise ValueError(f"Invalid timestamp value: {e}")
+            where_clause = f"WHERE timestamp > {timestamp_val}"
+
+        # Validate batch_size is a positive integer
+        try:
+            batch_size = int(self.config.batch_size)
+            if batch_size <= 0 or batch_size > 100000:
+                raise ValueError("batch_size must be between 1 and 100000")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Invalid batch_size: {e}")
 
         sql = f"""
             SELECT timestamp, client, domain, type, status, reply_time
             FROM queries
             {where_clause}
             ORDER BY timestamp ASC
-            LIMIT {self.config.batch_size};
+            LIMIT {batch_size};
         """
 
-        cmd = f'sqlite3 -separator "|" "{self.config.remote_db_path}" "{sql}"'
+        # Shell-escape both the database path and SQL to prevent command injection
+        cmd = f'sqlite3 -separator "|" {shlex.quote(str(self.config.remote_db_path))} {shlex.quote(sql)}'
 
         _, stdout, stderr = client.exec_command(cmd)
 
