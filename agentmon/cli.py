@@ -282,13 +282,8 @@ def baseline(ctx: click.Context) -> None:
 @click.option("--learning", is_flag=True, default=None, help="Learning mode: build baseline without alerting")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output (show each message)")
 @click.option("--llm", is_flag=True, default=None, help="Enable LLM classification via Ollama")
-@click.option(
-    "--llm-model",
-    type=str,
-    default=None,
-    envvar="AGENTMON_LLM_MODEL",
-    help="Ollama model name (default: llama3.3:70b)",
-)
+@click.option("--llm-triage", type=str, default=None, help="Fast triage model (default: gemma3:27b)")
+@click.option("--llm-escalation", type=str, default=None, help="Thorough escalation model (default: llama3.3:70b)")
 @click.pass_context
 def listen(
     ctx: click.Context,
@@ -299,7 +294,8 @@ def listen(
     learning: bool | None,
     verbose: bool,
     llm: bool | None,
-    llm_model: str | None,
+    llm_triage: str | None,
+    llm_escalation: str | None,
 ) -> None:
     """Listen for syslog messages from edge devices.
 
@@ -331,7 +327,8 @@ def listen(
 
     use_learning = learning if learning is not None else cfg.learning_mode
     use_llm = llm if llm is not None else cfg.llm_enabled
-    use_llm_model = llm_model if llm_model is not None else cfg.llm_model
+    use_triage = llm_triage if llm_triage is not None else cfg.llm_triage_model
+    use_escalation = llm_escalation if llm_escalation is not None else cfg.llm_escalation_model
 
     syslog_config = SyslogConfig(
         port=syslog_port,
@@ -368,7 +365,8 @@ def listen(
     analyzer_config = AnalyzerConfig(
         learning_mode=use_learning,
         llm_enabled=use_llm,
-        llm_model=use_llm_model,
+        llm_triage_model=use_triage,
+        llm_escalation_model=use_escalation,
         known_bad_patterns=cfg.known_bad_patterns,
         allowlist=cfg.allowlist,
         ignore_suffixes=cfg.ignore_suffixes,
@@ -448,7 +446,7 @@ def listen(
         if use_learning:
             console.print("[cyan]Learning mode: building baseline only[/cyan]")
         if use_llm:
-            console.print(f"[cyan]LLM classification: Ollama ({use_llm_model})[/cyan]")
+            console.print(f"[cyan]LLM triage: {use_triage} → escalation: {use_escalation}[/cyan]")
         if syslog_allowed:
             console.print(f"[cyan]Allowed IPs: {', '.join(syslog_allowed)}[/cyan]")
         console.print("[dim]Press Ctrl+C to stop[/dim]")

@@ -43,9 +43,10 @@ class AnalyzerConfig:
         ".arpa",  # Reverse DNS
     ])
 
-    # LLM classification settings (uses Ollama)
-    llm_enabled: bool = False  # Enable LLM classification via Ollama
-    llm_model: str = "llama3.3:70b"  # Ollama model name
+    # LLM classification settings (uses Ollama, two-tier)
+    llm_enabled: bool = False
+    llm_triage_model: str = "gemma3:27b"
+    llm_escalation_model: str = "llama3.3:70b"
     llm_classify_new_domains: bool = True  # Classify new domains with LLM
     llm_classify_alerts: bool = True  # Enrich alerts with LLM analysis
 
@@ -64,15 +65,21 @@ class DNSBaselineAnalyzer:
             self._init_classifier()
 
     def _init_classifier(self) -> None:
-        """Initialize the LLM classifier (uses Ollama)."""
+        """Initialize the LLM classifier (two-tier via Ollama)."""
         try:
             from agentmon.llm.classifier import DomainClassifier, LLMConfig
 
-            llm_config = LLMConfig(model=self.config.llm_model)
+            llm_config = LLMConfig(
+                triage_model=self.config.llm_triage_model,
+                escalation_model=self.config.llm_escalation_model,
+            )
             self._classifier = DomainClassifier(llm_config)
             self._classifier_available = self._classifier.available
             if self._classifier_available:
-                logger.info(f"Ollama classifier ready: {self.config.llm_model}")
+                logger.info(
+                    f"LLM classifier ready - triage: {self.config.llm_triage_model}, "
+                    f"escalation: {self.config.llm_escalation_model}"
+                )
             else:
                 logger.warning("Ollama not available - LLM classification disabled")
         except Exception as e:
@@ -94,7 +101,10 @@ class DNSBaselineAnalyzer:
                 query_type=event.query_type,
                 blocked=event.blocked,
             )
-            return f"{result.category.value} (confidence: {result.confidence:.2f}): {result.reasoning}"
+            escalation_note = ""
+            if result.escalated and result.triage_category:
+                escalation_note = f" [escalated from {result.triage_category}]"
+            return f"{result.category.value} (confidence: {result.confidence:.2f}){escalation_note}: {result.reasoning}"
         except Exception as e:
             logger.debug(f"LLM classification failed for {event.domain}: {e}")
             return None

@@ -58,9 +58,10 @@ class Config:
         ".local", ".lan", ".home", ".internal", ".localdomain", ".arpa"
     ])
 
-    # LLM
+    # LLM (two-tier)
     llm_enabled: bool = False
-    llm_model: str = "llama3.3:70b"
+    llm_triage_model: str = "gemma3:27b"
+    llm_escalation_model: str = "llama3.3:70b"
 
     # Alerting
     min_severity: str = "low"
@@ -133,8 +134,14 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         llm = data["llm"]
         if "enabled" in llm:
             config.llm_enabled = llm["enabled"]
-        if "model" in llm:
-            config.llm_model = llm["model"]
+        if "triage_model" in llm:
+            config.llm_triage_model = llm["triage_model"]
+        if "escalation_model" in llm:
+            config.llm_escalation_model = llm["escalation_model"]
+        # Backwards compatibility: single "model" sets both
+        if "model" in llm and "triage_model" not in llm:
+            config.llm_triage_model = llm["model"]
+            config.llm_escalation_model = llm["model"]
 
     # Alerting section
     if "alerting" in data:

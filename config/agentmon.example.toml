@@ -119,7 +119,17 @@ ignore_suffixes = [
 # LLM classification via Ollama (must have Ollama running locally)
 # Enable with: agentmon listen --llm
 enabled = false
-model = "llama3.3:70b"  # Any model available in Ollama
+
+# Two-tier classification: fast triage, thorough escalation
+# Triage model runs on every alert; escalation only for suspicious results
+triage_model = "gemma3:27b"
+escalation_model = "llama3.3:70b"
+
+# Escalate when triage returns these categories
+escalation_categories = ["suspicious", "likely_malicious", "dga", "unknown"]
+
+# Also escalate when triage confidence is below this threshold
+escalation_confidence_threshold = 0.7
 
 [alerting]
 # Minimum severity to alert on
