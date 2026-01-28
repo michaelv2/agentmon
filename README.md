@@ -1,6 +1,12 @@
 # agentmon
 
-Network agent activity monitor and auditor. Detects anomalous DNS activity from AI agents and other software by monitoring Pi-hole logs.
+Network agent activity monitor and auditor. Detects anomalous DNS activity from AI agents and other software by monitoring Pi-hole and/or OpenWRT logs.
+
+This project grew out of a desire to better understand what AI agents (e.g., Clawdbot / Moltbot, Auto-GPT, BabyAGI) are doing on a network. By monitoring DNS and router activity, we can detect potentially unwanted or suspicious behavior, such as connections to known command-and-control servers, domain generation algorithms (DGAs), or other anomalous patterns.
+
+The simplest configuration is to run a Pi-hole instance on the network and have agentmon monitor its logs. For more advanced setups, OpenWRT integration can provide additional context via connection tracking and firewall logs.
+
+The LLM integration allows for intelligent classification of domains based on their context and behavior, enabling more nuanced detection of potential threats. It requires an Ollama instance running locally or remotely, but is optional.
 
 ## Features
 
