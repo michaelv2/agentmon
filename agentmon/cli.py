@@ -1,21 +1,21 @@
 """Command-line interface for agentmon."""
 
+import asyncio
+import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
 from rich.table import Table
 
-from agentmon.collectors import PiholeCollector
-from agentmon.collectors.pihole import PiholeConfig
-from agentmon.storage import EventStore
 from agentmon.analyzers import DNSBaselineAnalyzer
 from agentmon.analyzers.dns_baseline import AnalyzerConfig
+from agentmon.collectors import PiholeCollector
+from agentmon.collectors.pihole import PiholeConfig
 from agentmon.models import Severity
-
+from agentmon.storage import EventStore
 
 console = Console()
 
@@ -33,7 +33,7 @@ def get_default_db_path() -> Path:
     help="Path to the DuckDB database file",
 )
 @click.pass_context
-def main(ctx: click.Context, db: Optional[Path]) -> None:
+def main(ctx: click.Context, db: Path | None) -> None:
     """agentmon - Network agent activity monitor and auditor."""
     ctx.ensure_object(dict)
 
@@ -47,7 +47,11 @@ def main(ctx: click.Context, db: Optional[Path]) -> None:
 
 
 @main.command()
-@click.option("--local", type=click.Path(exists=True, path_type=Path), help="Local path to pihole-FTL.db")
+@click.option(
+    "--local",
+    type=click.Path(exists=True, path_type=Path),
+    help="Local path to pihole-FTL.db",
+)
 @click.option("--host", type=str, help="SSH host for remote Pi-hole")
 @click.option("--user", type=str, default="pi", help="SSH username")
 @click.option("--key", type=click.Path(exists=True, path_type=Path), help="SSH key file")
@@ -56,10 +60,10 @@ def main(ctx: click.Context, db: Optional[Path]) -> None:
 @click.pass_context
 def collect(
     ctx: click.Context,
-    local: Optional[Path],
-    host: Optional[str],
+    local: Path | None,
+    host: str | None,
     user: str,
-    key: Optional[Path],
+    key: Path | None,
     batch_size: int,
     learning: bool,
 ) -> None:
@@ -111,7 +115,9 @@ def collect(
                 analyzer.analyze_event(event)  # Just updates baseline
 
             stats = analyzer.get_baseline_stats()
-            console.print(f"[cyan]Baseline: {stats.get('total_domains', 0)} domains from {stats.get('total_clients', 0)} clients[/cyan]")
+            domains = stats.get("total_domains", 0)
+            clients = stats.get("total_clients", 0)
+            console.print(f"[cyan]Baseline: {domains} domains from {clients} clients[/cyan]")
         else:
             alerts = analyzer.analyze_batch(events)
 
@@ -126,13 +132,18 @@ def collect(
                         Severity.HIGH: "red",
                         Severity.CRITICAL: "red bold",
                     }.get(alert.severity, "white")
-                    console.print(f"  [{severity_color}][{alert.severity.value.upper()}][/{severity_color}] {alert.title}")
+                    sev = alert.severity.value.upper()
+                    console.print(f"  [{severity_color}][{sev}][/{severity_color}] {alert.title}")
             else:
                 console.print("[green]No alerts generated[/green]")
 
 
 @main.command()
-@click.option("--severity", type=click.Choice(["info", "low", "medium", "high", "critical"]), default="low")
+@click.option(
+    "--severity",
+    type=click.Choice(["info", "low", "medium", "high", "critical"]),
+    default="low",
+)
 @click.option("--limit", type=int, default=50)
 @click.pass_context
 def alerts(ctx: click.Context, severity: str, limit: int) -> None:
@@ -230,7 +241,8 @@ def baseline(ctx: click.Context) -> None:
         stats = analyzer.get_baseline_stats()
 
         if not stats or stats.get("total_domains", 0) == 0:
-            console.print("[yellow]No baseline data yet. Run 'agentmon collect --learning' first.[/yellow]")
+            msg = "No baseline data yet. Run 'agentmon collect --learning' first."
+            console.print(f"[yellow]{msg}[/yellow]")
             return
 
         console.print("[cyan]Baseline Statistics[/cyan]")
@@ -242,6 +254,151 @@ def baseline(ctx: click.Context) -> None:
             console.print(f"  Earliest: {stats['earliest']}")
         if stats.get("latest"):
             console.print(f"  Latest: {stats['latest']}")
+
+
+@main.command()
+@click.option("--port", type=int, default=1514, help="Port to listen on (default: 1514)")
+@click.option(
+    "--protocol",
+    type=click.Choice(["udp", "tcp", "both"]),
+    default="tcp",
+    help="Protocol to use (default: tcp)",
+)
+@click.option("--bind", type=str, default="0.0.0.0", help="Address to bind to (default: 0.0.0.0)")
+@click.option("--allow", type=str, multiple=True, help="Allowed source IPs (can specify multiple)")
+@click.option("--learning", is_flag=True, help="Learning mode: build baseline without alerting")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output (show each message)")
+@click.pass_context
+def listen(
+    ctx: click.Context,
+    port: int,
+    protocol: str,
+    bind: str,
+    allow: tuple[str, ...],
+    learning: bool,
+    verbose: bool,
+) -> None:
+    """Listen for syslog messages from edge devices.
+
+    Starts a syslog receiver that accepts messages from Pi-hole, OpenWRT,
+    and other devices configured to forward logs.
+
+    Example:
+        agentmon listen --port 1514 --protocol udp
+
+    Edge device configuration:
+        Pi-hole: Add to /etc/rsyslog.d/99-agentmon.conf:
+            if $programname == 'dnsmasq' then @@<hub-ip>:1514
+
+        OpenWRT: In /etc/config/system:
+            option log_ip '<hub-ip>'
+            option log_port '1514'
+    """
+    from agentmon.collectors.syslog_parsers import route_message
+    from agentmon.collectors.syslog_receiver import SyslogConfig, SyslogMessage, SyslogReceiver
+
+    db_path: Path = ctx.obj["db_path"]
+
+    config = SyslogConfig(
+        port=port,
+        protocol=protocol,
+        bind_address=bind,
+        allowed_ips=list(allow),
+    )
+
+    # Set up logging
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Counters for stats
+    stats = {
+        "messages_received": 0,
+        "dns_events": 0,
+        "connection_events": 0,
+        "alerts": 0,
+    }
+
+    store = EventStore(db_path)
+    store.connect()
+
+    analyzer_config = AnalyzerConfig(learning_mode=learning)
+    analyzer = DNSBaselineAnalyzer(store, analyzer_config)
+
+    def handle_message(msg: SyslogMessage) -> None:
+        """Process a received syslog message."""
+        stats["messages_received"] += 1
+
+        if verbose:
+            console.print(
+                f"[dim]{msg.timestamp.strftime('%H:%M:%S')}[/dim] "
+                f"[cyan]{msg.hostname}[/cyan] "
+                f"[yellow]{msg.tag}[/yellow]: {msg.message[:80]}"
+            )
+
+        # Route to appropriate parser
+        dns_event, conn_event = route_message(msg)
+
+        if dns_event:
+            stats["dns_events"] += 1
+            store.insert_dns_event(dns_event)
+
+            # Analyze for threats
+            alerts = analyzer.analyze_event(dns_event)
+            for alert in alerts:
+                stats["alerts"] += 1
+                store.insert_alert(alert)
+                severity_color = {
+                    Severity.INFO: "dim",
+                    Severity.LOW: "blue",
+                    Severity.MEDIUM: "yellow",
+                    Severity.HIGH: "red",
+                    Severity.CRITICAL: "red bold",
+                }.get(alert.severity, "white")
+                console.print(
+                    f"[{severity_color}][ALERT][/{severity_color}] "
+                    f"{alert.title} - {alert.domain}"
+                )
+
+        if conn_event:
+            stats["connection_events"] += 1
+            # Connection events storage not yet implemented
+            if verbose:
+                console.print(
+                    f"[dim]Connection:[/dim] {conn_event.client}:{conn_event.src_port} -> "
+                    f"{conn_event.dst_ip}:{conn_event.dst_port} ({conn_event.protocol})"
+                )
+
+    async def run() -> None:
+        """Run the syslog receiver."""
+        receiver = SyslogReceiver(config, handle_message)
+
+        console.print(f"[green]Starting syslog receiver on {bind}:{port} ({protocol})[/green]")
+        if learning:
+            console.print("[cyan]Learning mode: building baseline only[/cyan]")
+        if allow:
+            console.print(f"[cyan]Allowed IPs: {', '.join(allow)}[/cyan]")
+        console.print("[dim]Press Ctrl+C to stop[/dim]")
+        console.print()
+
+        try:
+            await receiver.run_forever()
+        finally:
+            store.close()
+            console.print()
+            console.print("[green]Syslog receiver stopped[/green]")
+            console.print(f"  Messages received: {stats['messages_received']:,}")
+            console.print(f"  DNS events: {stats['dns_events']:,}")
+            console.print(f"  Connection events: {stats['connection_events']:,}")
+            console.print(f"  Alerts generated: {stats['alerts']:,}")
+
+    import contextlib
+
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

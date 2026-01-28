@@ -8,13 +8,30 @@ path = "~/.local/share/agentmon/events.db"
 # Local database path (if Pi-hole is on the same machine or mounted)
 # db_path = "/etc/pihole/pihole-FTL.db"
 
-# Remote Pi-hole via SSH
+# Remote Pi-hole via SSH (pull model - deprecated in favor of syslog push)
 ssh_host = "pihole.local"
 ssh_user = "pi"
 # ssh_key_path = "~/.ssh/id_ed25519"
 remote_db_path = "/etc/pihole/pihole-FTL.db"
 
 batch_size = 1000
+
+[syslog]
+# Syslog receiver for push-based collection from edge devices
+# More secure than SSH pull - hub holds no credentials to infrastructure
+
+# Port to listen on (use 1514 to avoid requiring root for <1024)
+port = 1514
+
+# Protocol: "tcp" (default, recommended), "udp", or "both"
+# TCP provides reliable delivery with no gaps in audit trail
+protocol = "tcp"
+
+# Bind address (use specific IP to restrict access, or 0.0.0.0 for all)
+bind_address = "0.0.0.0"
+
+# Optional: IP allowlist (empty = accept from all sources)
+# allowed_ips = ["192.168.1.2", "192.168.1.3"]
 
 [analyzer]
 # Entropy threshold for DGA detection (higher = fewer false positives)
