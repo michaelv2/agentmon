@@ -45,7 +45,7 @@ class AnalyzerConfig:
 
     # LLM classification settings (uses Ollama)
     llm_enabled: bool = False  # Enable LLM classification via Ollama
-    llm_model: str = "llama3.2"  # Ollama model name
+    llm_model: str = "llama3.3:70b"  # Ollama model name
     llm_classify_new_domains: bool = True  # Classify new domains with LLM
     llm_classify_alerts: bool = True  # Enrich alerts with LLM analysis
 

@@ -38,7 +38,7 @@ class ClassificationResult:
 @dataclass
 class LLMConfig:
     """Configuration for LLM classifier."""
-    model: str = "llama3.2"
+    model: str = "llama3.3:70b"
     timeout_seconds: float = 30.0
 
 

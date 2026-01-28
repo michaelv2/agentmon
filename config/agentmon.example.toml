@@ -70,7 +70,7 @@ ignore_suffixes = [
 # LLM classification via Ollama (must have Ollama running locally)
 # Enable with: agentmon listen --llm
 enabled = false
-model = "llama3.2"  # Any model available in Ollama
+model = "llama3.3:70b"  # Any model available in Ollama
 
 [alerting]
 # Minimum severity to alert on

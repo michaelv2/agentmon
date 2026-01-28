@@ -272,9 +272,9 @@ def baseline(ctx: click.Context) -> None:
 @click.option(
     "--llm-model",
     type=str,
-    default="llama3.2",
+    default="llama3.3:70b",
     envvar="AGENTMON_LLM_MODEL",
-    help="Ollama model name (default: llama3.2)",
+    help="Ollama model name (default: llama3.3:70b)",
 )
 @click.pass_context
 def listen(
