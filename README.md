@@ -304,3 +304,10 @@ See [SECURITY.md](SECURITY.md) for:
 - Known security issues and mitigations
 - Deployment hardening recommendations
 - How to report vulnerabilities
+
+## Architecture Details
+
+See [SMART_ANALYZE.md](SMART_ANALYZE.md) for technical details on:
+- Client identity resolution implementation
+- Device activity anomaly detection algorithm
+- Data retention policy design
