@@ -43,11 +43,60 @@ entropy_min_length = 10
 # Learning mode: only build baseline, don't generate alerts
 learning_mode = false
 
-# Known-bad domain patterns (substring match)
+# Known-bad domain patterns (substring match, case-insensitive)
+# Organized by threat category - customize for your environment
 known_bad_patterns = [
-    "malware",
+    # === TIER 1: C2 FRAMEWORKS (High confidence) ===
+    "c2-",
     "c2server",
-    # Add your own patterns here
+    "beacon",
+    "team-server",
+    "sliver",
+    "havoc",
+    "mythic",
+    "brute-ratel",
+    "cobalt-strike",
+
+    # === TIER 1: MALWARE INDICATORS ===
+    "malware",
+    "botnet",
+    "ransomware",
+    "rat-",
+    "infostealer",
+    "stealer-",
+    "payload",
+    "exploit-",
+    "shellcode",
+
+    # === TIER 1: C2 INFRASTRUCTURE ===
+    "callback",
+    "checkin-",
+    "redirector",
+
+    # === TIER 2: DATA EXFILTRATION SERVICES ===
+    # These have legitimate uses but are common abuse vectors
+    "pastebin",
+    "anonfiles",
+    "gofile",
+    "transfer.sh",
+
+    # === TIER 2: CRYPTO MINING ===
+    "stratum",
+    "nicehash",
+    "minergate",
+    "xmr-pool",
+    "monero-pool",
+    "-mining-pool",
+
+    # === TIER 2: DNS TUNNELING ===
+    "dns-tunnel",
+    "exfil-",
+
+    # === TIER 3: ANONYMIZATION (uncomment if needed) ===
+    # May generate false positives for VPN/privacy users
+    # "tor-proxy",
+    # "vpn-proxy",
+    # "proxychain",
 ]
 
 # Domains to always ignore (exact match)
