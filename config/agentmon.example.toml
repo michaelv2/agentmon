@@ -67,13 +67,10 @@ ignore_suffixes = [
 ]
 
 [llm]
-# Local LLM endpoint for domain classification
-local_endpoint = "http://localhost:8080/v1"
-local_model = "llama3.3-70b"
-
-# Frontier API for escalated analysis (optional)
-# frontier_api_key = ""  # Set via AGENTMON_FRONTIER_API_KEY env var
-# frontier_model = "claude-sonnet-4-20250514"
+# LLM classification via Ollama (must have Ollama running locally)
+# Enable with: agentmon listen --llm
+enabled = false
+model = "llama3.2"  # Any model available in Ollama
 
 [alerting]
 # Minimum severity to alert on

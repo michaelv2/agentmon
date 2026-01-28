@@ -1,15 +1,15 @@
 """LLM-based domain classifier.
 
-Uses local LLM for initial classification, with optional escalation
-to frontier models for ambiguous cases.
+Uses Ollama for local LLM classification of domains.
 """
 
+import json
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
-import json
 
-import httpx
+logger = logging.getLogger(__name__)
 
 
 class DomainCategory(Enum):
@@ -33,19 +33,13 @@ class ClassificationResult:
     category: DomainCategory
     confidence: float  # 0.0 to 1.0
     reasoning: str
-    escalated: bool = False
 
 
 @dataclass
 class LLMConfig:
     """Configuration for LLM classifier."""
-    local_endpoint: str = "http://localhost:8080/v1"
-    local_model: str = "llama3.3-70b"
-    frontier_endpoint: Optional[str] = None
-    frontier_api_key: Optional[str] = None
-    frontier_model: Optional[str] = None
+    model: str = "llama3.2"
     timeout_seconds: float = 30.0
-    escalation_confidence_threshold: float = 0.6
 
 
 CLASSIFICATION_PROMPT = """You are a network security analyst classifying domain names.
@@ -78,11 +72,31 @@ Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 
 
 class DomainClassifier:
-    """Classifies domains using local and optionally frontier LLMs."""
+    """Classifies domains using Ollama."""
 
     def __init__(self, config: Optional[LLMConfig] = None) -> None:
         self.config = config or LLMConfig()
-        self._client = httpx.Client(timeout=self.config.timeout_seconds)
+        self._client = None
+        self._available = False
+        self._init_client()
+
+    def _init_client(self) -> None:
+        """Initialize the Ollama client."""
+        try:
+            import ollama
+            # Test connection by listing models
+            ollama.list()
+            self._client = ollama
+            self._available = True
+            logger.info(f"Ollama connected, using model: {self.config.model}")
+        except Exception as e:
+            logger.warning(f"Ollama not available: {e}")
+            self._available = False
+
+    @property
+    def available(self) -> bool:
+        """Check if the classifier is available."""
+        return self._available
 
     def classify(
         self,
@@ -91,7 +105,7 @@ class DomainClassifier:
         query_type: str = "",
         blocked: bool = False,
     ) -> ClassificationResult:
-        """Classify a domain using the local LLM.
+        """Classify a domain using Ollama.
 
         Args:
             domain: The domain to classify
@@ -102,6 +116,14 @@ class DomainClassifier:
         Returns:
             Classification result
         """
+        if not self._available:
+            return ClassificationResult(
+                domain=domain,
+                category=DomainCategory.UNKNOWN,
+                confidence=0.0,
+                reasoning="Ollama not available",
+            )
+
         prompt = CLASSIFICATION_PROMPT.format(
             domain=domain,
             client=client or "unknown",
@@ -109,79 +131,34 @@ class DomainClassifier:
             blocked="yes" if blocked else "no",
         )
 
-        # Try local LLM first
-        result = self._query_llm(
-            self.config.local_endpoint,
-            self.config.local_model,
-            prompt,
-        )
+        try:
+            response = self._client.chat(
+                model=self.config.model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.1},  # Low temperature for consistency
+            )
 
-        if result is None:
+            content = response["message"]["content"]
+            return self._parse_response(domain, content)
+
+        except Exception as e:
+            logger.debug(f"Ollama classification failed for {domain}: {e}")
             return ClassificationResult(
                 domain=domain,
                 category=DomainCategory.UNKNOWN,
                 confidence=0.0,
-                reasoning="LLM query failed",
+                reasoning=f"Classification failed: {e}",
             )
 
-        # Check if we should escalate
-        if (
-            result.confidence < self.config.escalation_confidence_threshold
-            and self.config.frontier_endpoint
-            and self.config.frontier_api_key
-        ):
-            escalated_result = self._escalate(domain, client, query_type, blocked)
-            if escalated_result:
-                escalated_result.escalated = True
-                return escalated_result
-
-        return result
-
-    def _query_llm(
-        self,
-        endpoint: str,
-        model: str,
-        prompt: str,
-        api_key: Optional[str] = None,
-    ) -> Optional[ClassificationResult]:
-        """Query an LLM endpoint."""
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,  # Low temperature for consistent classification
-            "max_tokens": 256,
-        }
-
-        try:
-            response = self._client.post(
-                f"{endpoint}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-
-            # Parse the JSON response
-            return self._parse_response(content)
-
-        except (httpx.HTTPError, KeyError, json.JSONDecodeError) as e:
-            # Log error in production
-            return None
-
-    def _parse_response(self, content: str) -> Optional[ClassificationResult]:
+    def _parse_response(self, domain: str, content: str) -> ClassificationResult:
         """Parse LLM response into ClassificationResult."""
         try:
             # Handle potential markdown code blocks
             content = content.strip()
             if content.startswith("```"):
                 lines = content.split("\n")
-                content = "\n".join(lines[1:-1])
+                # Remove first and last line (``` markers)
+                content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
 
             data = json.loads(content)
 
@@ -192,61 +169,24 @@ class DomainClassifier:
                 category = DomainCategory.UNKNOWN
 
             return ClassificationResult(
-                domain="",  # Will be filled in by caller
+                domain=domain,
                 category=category,
                 confidence=float(data.get("confidence", 0.5)),
                 reasoning=data.get("reasoning", ""),
             )
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.debug(f"Failed to parse LLM response: {e}")
+            return ClassificationResult(
+                domain=domain,
+                category=DomainCategory.UNKNOWN,
+                confidence=0.0,
+                reasoning=f"Failed to parse response: {content[:100]}",
+            )
 
-    def _escalate(
-        self,
-        domain: str,
-        client: str,
-        query_type: str,
-        blocked: bool,
-    ) -> Optional[ClassificationResult]:
-        """Escalate to frontier model for better classification."""
-        if not self.config.frontier_endpoint or not self.config.frontier_model:
-            return None
-
-        prompt = CLASSIFICATION_PROMPT.format(
-            domain=domain,
-            client=client or "unknown",
-            query_type=query_type or "unknown",
-            blocked="yes" if blocked else "no",
-        )
-
-        result = self._query_llm(
-            self.config.frontier_endpoint,
-            self.config.frontier_model,
-            prompt,
-            self.config.frontier_api_key,
-        )
-
-        if result:
-            result.domain = domain
-
-        return result
-
-    def classify_batch(
-        self,
-        domains: list[str],
-    ) -> list[ClassificationResult]:
+    def classify_batch(self, domains: list[str]) -> list[ClassificationResult]:
         """Classify multiple domains.
 
-        Note: This currently processes sequentially. For better performance
-        with many domains, consider implementing async batch processing.
+        Note: Processes sequentially. For better performance with many domains,
+        consider implementing async batch processing.
         """
         return [self.classify(domain) for domain in domains]
-
-    def close(self) -> None:
-        """Close the HTTP client."""
-        self._client.close()
-
-    def __enter__(self) -> "DomainClassifier":
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.close()

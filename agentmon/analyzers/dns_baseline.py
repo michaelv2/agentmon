@@ -43,9 +43,9 @@ class AnalyzerConfig:
         ".arpa",  # Reverse DNS
     ])
 
-    # LLM classification settings
-    llm_endpoint: Optional[str] = None  # e.g., "http://localhost:8080/v1"
-    llm_model: str = "llama3.3"
+    # LLM classification settings (uses Ollama)
+    llm_enabled: bool = False  # Enable LLM classification via Ollama
+    llm_model: str = "llama3.2"  # Ollama model name
     llm_classify_new_domains: bool = True  # Classify new domains with LLM
     llm_classify_alerts: bool = True  # Enrich alerts with LLM analysis
 
@@ -59,22 +59,22 @@ class DNSBaselineAnalyzer:
         self._classifier = None
         self._classifier_available = False
 
-        # Initialize LLM classifier if endpoint is configured
-        if self.config.llm_endpoint:
+        # Initialize LLM classifier if enabled
+        if self.config.llm_enabled:
             self._init_classifier()
 
     def _init_classifier(self) -> None:
-        """Initialize the LLM classifier."""
+        """Initialize the LLM classifier (uses Ollama)."""
         try:
             from agentmon.llm.classifier import DomainClassifier, LLMConfig
 
-            llm_config = LLMConfig(
-                local_endpoint=self.config.llm_endpoint,
-                local_model=self.config.llm_model,
-            )
+            llm_config = LLMConfig(model=self.config.llm_model)
             self._classifier = DomainClassifier(llm_config)
-            self._classifier_available = True
-            logger.info(f"LLM classifier initialized: {self.config.llm_endpoint}")
+            self._classifier_available = self._classifier.available
+            if self._classifier_available:
+                logger.info(f"Ollama classifier ready: {self.config.llm_model}")
+            else:
+                logger.warning("Ollama not available - LLM classification disabled")
         except Exception as e:
             logger.warning(f"Failed to initialize LLM classifier: {e}")
             self._classifier_available = False

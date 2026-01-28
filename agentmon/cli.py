@@ -268,19 +268,13 @@ def baseline(ctx: click.Context) -> None:
 @click.option("--allow", type=str, multiple=True, help="Allowed source IPs (can specify multiple)")
 @click.option("--learning", is_flag=True, help="Learning mode: build baseline without alerting")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output (show each message)")
-@click.option(
-    "--llm-endpoint",
-    type=str,
-    default=None,
-    envvar="AGENTMON_LLM_ENDPOINT",
-    help="LLM API endpoint for domain classification (e.g., http://localhost:8080/v1)",
-)
+@click.option("--llm", is_flag=True, help="Enable LLM classification via Ollama")
 @click.option(
     "--llm-model",
     type=str,
-    default="llama3.3",
+    default="llama3.2",
     envvar="AGENTMON_LLM_MODEL",
-    help="LLM model name (default: llama3.3)",
+    help="Ollama model name (default: llama3.2)",
 )
 @click.pass_context
 def listen(
@@ -291,7 +285,7 @@ def listen(
     allow: tuple[str, ...],
     learning: bool,
     verbose: bool,
-    llm_endpoint: str | None,
+    llm: bool,
     llm_model: str,
 ) -> None:
     """Listen for syslog messages from edge devices.
@@ -343,7 +337,7 @@ def listen(
 
     analyzer_config = AnalyzerConfig(
         learning_mode=learning,
-        llm_endpoint=llm_endpoint,
+        llm_enabled=llm,
         llm_model=llm_model,
     )
     analyzer = DNSBaselineAnalyzer(store, analyzer_config)
@@ -418,8 +412,8 @@ def listen(
         console.print(f"[green]Starting syslog receiver on {bind}:{port} ({protocol})[/green]")
         if learning:
             console.print("[cyan]Learning mode: building baseline only[/cyan]")
-        if llm_endpoint:
-            console.print(f"[cyan]LLM classification: {llm_model} @ {llm_endpoint}[/cyan]")
+        if llm:
+            console.print(f"[cyan]LLM classification: Ollama ({llm_model})[/cyan]")
         if allow:
             console.print(f"[cyan]Allowed IPs: {', '.join(allow)}[/cyan]")
         console.print("[dim]Press Ctrl+C to stop[/dim]")
