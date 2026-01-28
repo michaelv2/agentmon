@@ -174,10 +174,9 @@ def run_benchmark(models: list[str], verbose: bool = False) -> None:
     import ollama
 
     # Verify models exist
-    available = {m["name"] for m in ollama.list()["models"]}
+    available = {m.model for m in ollama.list().models}
     for model in models:
         if model not in available:
-            # Try without tag
             if not any(m.startswith(model.split(":")[0]) for m in available):
                 print(f"WARNING: Model '{model}' not found in Ollama", file=sys.stderr)
 
@@ -317,10 +316,10 @@ def main() -> None:
     else:
         # Default: test all local (non-cloud) models
         import ollama
-        all_models = ollama.list()["models"]
+        all_models = ollama.list().models
         models = [
-            m["name"] for m in all_models
-            if "cloud" not in m["name"] and m.get("size", 0) > 0
+            m.model for m in all_models
+            if "cloud" not in m.model and (m.size or 0) > 0
         ]
         if not models:
             print("No local models found. Pull a model first: ollama pull gemma3:27b")
