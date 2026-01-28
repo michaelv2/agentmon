@@ -23,20 +23,23 @@ SCHEMA_VERSION = 1
 class EventStore:
     """DuckDB-backed storage for network events and alerts."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, read_only: bool = False) -> None:
         """Initialize the event store.
 
         Args:
             db_path: Path to the DuckDB database file. Use ":memory:" for in-memory.
+            read_only: If True, open in read-only mode (allows concurrent readers).
         """
         self.db_path = db_path
+        self.read_only = read_only
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
 
     def connect(self) -> None:
         """Open database connection and ensure schema exists."""
         db_str = str(self.db_path) if self.db_path != Path(":memory:") else ":memory:"
-        self._conn = duckdb.connect(db_str)
-        self._ensure_schema()
+        self._conn = duckdb.connect(db_str, read_only=self.read_only)
+        if not self.read_only:
+            self._ensure_schema()
 
     def close(self) -> None:
         """Close database connection."""
@@ -341,7 +344,8 @@ class EventStore:
 
     def get_client_stats(self, hours: int = 24) -> list[dict]:
         """Get DNS query statistics per client for the last N hours."""
-        result = self.conn.execute("""
+        # DuckDB doesn't support parameterized INTERVAL, so we interpolate safely
+        result = self.conn.execute(f"""
             SELECT
                 client,
                 COUNT(*) as total_queries,
@@ -350,10 +354,10 @@ class EventStore:
                 MIN(timestamp) as first_query,
                 MAX(timestamp) as last_query
             FROM dns_events
-            WHERE timestamp > CURRENT_TIMESTAMP - INTERVAL ? HOUR
+            WHERE timestamp > CURRENT_TIMESTAMP - INTERVAL {int(hours)} HOUR
             GROUP BY client
             ORDER BY total_queries DESC
-        """, [hours]).fetchall()
+        """).fetchall()
 
         columns = ["client", "total_queries", "unique_domains",
                    "blocked_queries", "first_query", "last_query"]

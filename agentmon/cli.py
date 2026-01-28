@@ -150,7 +150,7 @@ def alerts(ctx: click.Context, severity: str, limit: int) -> None:
     """Show recent alerts."""
     db_path: Path = ctx.obj["db_path"]
 
-    with EventStore(db_path) as store:
+    with EventStore(db_path, read_only=True) as store:
         min_severity = Severity(severity)
         alert_list = store.get_unacknowledged_alerts(min_severity, limit)
 
@@ -198,7 +198,7 @@ def stats(ctx: click.Context, hours: int) -> None:
     """Show DNS statistics per client."""
     db_path: Path = ctx.obj["db_path"]
 
-    with EventStore(db_path) as store:
+    with EventStore(db_path, read_only=True) as store:
         client_stats = store.get_client_stats(hours)
 
         if not client_stats:
@@ -236,7 +236,7 @@ def baseline(ctx: click.Context) -> None:
     """Show baseline statistics."""
     db_path: Path = ctx.obj["db_path"]
 
-    with EventStore(db_path) as store:
+    with EventStore(db_path, read_only=True) as store:
         analyzer = DNSBaselineAnalyzer(store)
         stats = analyzer.get_baseline_stats()
 
