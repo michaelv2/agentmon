@@ -9,11 +9,21 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from cachetools import TTLCache
+
 from agentmon.models import DNSEvent, Alert, Severity
 from agentmon.storage.db import EventStore
 from agentmon.analyzers.entropy import looks_like_dga, is_high_entropy_domain
 
 logger = logging.getLogger(__name__)
+
+# Default alert deduplication settings
+DEFAULT_DEDUP_WINDOW = 600  # 10 minutes
+DEFAULT_DEDUP_CACHE_SIZE = 5000
+
+# Categories considered "benign" for severity downgrade purposes
+BENIGN_CATEGORIES = {"benign", "cdn", "cloud_provider", "api_service"}
+NOISE_CATEGORIES = {"advertising", "tracking"}
 
 
 @dataclass
@@ -45,10 +55,15 @@ class AnalyzerConfig:
 
     # LLM classification settings (uses Ollama, two-tier)
     llm_enabled: bool = False
-    llm_triage_model: str = "gpt-oss:20b"
+    llm_triage_model: str = "phi3:3.8b"
     llm_escalation_model: str = "gpt-oss:20b"
     llm_classify_new_domains: bool = True  # Classify new domains with LLM
     llm_classify_alerts: bool = True  # Enrich alerts with LLM analysis
+    llm_downgrade_enabled: bool = True  # Downgrade severity based on LLM
+    llm_downgrade_confidence: float = 0.8  # Minimum confidence to trust downgrade
+
+    # Alert deduplication: suppress repeated alerts for same (domain, client, type)
+    alert_dedup_window: int = DEFAULT_DEDUP_WINDOW  # seconds
 
 
 class DNSBaselineAnalyzer:
@@ -59,6 +74,13 @@ class DNSBaselineAnalyzer:
         self.config = config or AnalyzerConfig()
         self._classifier = None
         self._classifier_available = False
+
+        # Alert deduplication cache: (domain, client, alert_type) -> True
+        self._alert_cache: TTLCache[str, bool] = TTLCache(
+            maxsize=DEFAULT_DEDUP_CACHE_SIZE,
+            ttl=self.config.alert_dedup_window,
+        )
+        self._dedup_hits = 0
 
         # Initialize LLM classifier if enabled
         if self.config.llm_enabled:
@@ -91,20 +113,29 @@ class DNSBaselineAnalyzer:
 
         Returns the classification as a string, or None if unavailable.
         """
+        result = self._classify_domain_full(event)
+        if result is None:
+            return None
+        escalation_note = ""
+        if result.escalated and result.triage_category:
+            escalation_note = f" [escalated from {result.triage_category}]"
+        return f"{result.category.value} (confidence: {result.confidence:.2f}){escalation_note}: {result.reasoning}"
+
+    def _classify_domain_full(self, event: DNSEvent):
+        """Classify a domain using the LLM.
+
+        Returns the full ClassificationResult, or None if unavailable.
+        """
         if not self._classifier_available or not self._classifier:
             return None
 
         try:
-            result = self._classifier.classify(
+            return self._classifier.classify(
                 domain=event.domain,
                 client=event.client,
                 query_type=event.query_type,
                 blocked=event.blocked,
             )
-            escalation_note = ""
-            if result.escalated and result.triage_category:
-                escalation_note = f" [escalated from {result.triage_category}]"
-            return f"{result.category.value} (confidence: {result.confidence:.2f}){escalation_note}: {result.reasoning}"
         except Exception as e:
             logger.debug(f"LLM classification failed for {event.domain}: {e}")
             return None
@@ -114,9 +145,72 @@ class DNSBaselineAnalyzer:
         if not self.config.llm_classify_alerts or alert.llm_analysis:
             return
 
-        llm_analysis = self._classify_domain(event)
-        if llm_analysis:
-            alert.llm_analysis = llm_analysis
+        result = self._classify_domain_full(event)
+        if result:
+            # Format analysis text (existing behavior)
+            escalation_note = ""
+            if result.escalated and result.triage_category:
+                escalation_note = f" [escalated from {result.triage_category}]"
+            alert.llm_analysis = (
+                f"{result.category.value} (confidence: {result.confidence:.2f})"
+                f"{escalation_note}: {result.reasoning}"
+            )
+
+            # Consider severity downgrade based on LLM classification
+            self._maybe_downgrade_severity(alert, result)
+
+    def _maybe_downgrade_severity(self, alert: Alert, result) -> None:
+        """Downgrade alert severity if LLM indicates benign domain.
+
+        Only downgrades when LLM classification indicates the domain is
+        legitimate (benign, CDN, cloud provider, API service) or low-risk
+        (advertising, tracking) with sufficient confidence.
+        """
+        if not self.config.llm_downgrade_enabled:
+            return
+
+        # Require high confidence or escalation for downgrade
+        if result.confidence < self.config.llm_downgrade_confidence:
+            if not result.escalated:
+                return
+
+        category = result.category.value
+        original_severity = alert.severity
+
+        if category in BENIGN_CATEGORIES:
+            alert.severity = Severity.INFO
+        elif category in NOISE_CATEGORIES:
+            alert.severity = Severity.LOW
+        else:
+            return  # No downgrade for suspicious/malicious/unknown
+
+        if alert.severity != original_severity:
+            alert.description += f" [LLM downgraded: {original_severity.value} → {alert.severity.value}]"
+            logger.info(
+                f"Downgraded {alert.domain}: {original_severity.value} → {alert.severity.value} "
+                f"(LLM: {category}, conf={result.confidence:.2f})"
+            )
+
+    def _is_duplicate_alert(self, domain: str, client: str, alert_type: str) -> bool:
+        """Check if we've already alerted on this (domain, client, type) recently.
+
+        If not a duplicate, marks it so future calls within the TTL window return True.
+        """
+        cache_key = f"{domain}|{client}|{alert_type}"
+        if cache_key in self._alert_cache:
+            self._dedup_hits += 1
+            logger.debug(f"Dedup: suppressing repeat alert for {domain} ({alert_type})")
+            return True
+        self._alert_cache[cache_key] = True
+        return False
+
+    @property
+    def dedup_stats(self) -> dict[str, int]:
+        """Return deduplication statistics."""
+        return {
+            "suppressed": self._dedup_hits,
+            "cache_size": len(self._alert_cache),
+        }
 
     def analyze_event(self, event: DNSEvent) -> list[Alert]:
         """Analyze a single DNS event and return any alerts.
@@ -144,21 +238,24 @@ class DNSBaselineAnalyzer:
         # Check 1: Known-bad patterns
         bad_alert = self._check_known_bad(event, domain_lower)
         if bad_alert:
-            self._enrich_alert_with_llm(bad_alert, event)
-            alerts.append(bad_alert)
+            if not self._is_duplicate_alert(domain_lower, event.client, "known_bad"):
+                self._enrich_alert_with_llm(bad_alert, event)
+                alerts.append(bad_alert)
 
         # Check 2: DGA detection
         dga_alert = self._check_dga(event, domain_lower)
         if dga_alert:
-            self._enrich_alert_with_llm(dga_alert, event)
-            alerts.append(dga_alert)
+            if not self._is_duplicate_alert(domain_lower, event.client, "dga"):
+                self._enrich_alert_with_llm(dga_alert, event)
+                alerts.append(dga_alert)
 
         # Check 3: New domain (not in baseline)
         if not self.config.learning_mode:
             new_domain_alert = self._check_new_domain(event, domain_lower)
             if new_domain_alert:
-                # LLM analysis already added in _check_new_domain
-                alerts.append(new_domain_alert)
+                if not self._is_duplicate_alert(domain_lower, event.client, "new_domain"):
+                    # LLM analysis already added in _check_new_domain
+                    alerts.append(new_domain_alert)
 
         # Always update baseline (after checks, so we can detect "new")
         self.store.update_domain_baseline(event.client, domain_lower, event.timestamp)

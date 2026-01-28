@@ -25,21 +25,25 @@ This guide explains how to configure your edge devices (Pi-hole, OpenWRT) to pus
 On your agentmon hub:
 
 ```bash
-# Basic usage (TCP on port 1514 - default)
+# Basic usage - localhost only (default)
+# Use this when running on the same machine as Pi-hole
 agentmon listen
 
-# Explicit port and protocol
-agentmon listen --port 1514 --protocol tcp
+# Accept from remote devices on your LAN
+# IMPORTANT: Specify your hub's LAN IP and allowlist source IPs
+agentmon listen --bind 192.168.1.100 --allow 192.168.1.2 --allow 192.168.1.3
 
-# Restrict to specific source IPs
-agentmon listen --allow 192.168.1.2 --allow 192.168.1.3
+# Explicit port and protocol
+agentmon listen --port 1514 --protocol tcp --bind 192.168.1.100
 
 # Learning mode (build baseline without alerting)
-agentmon listen --learning
+agentmon listen --learning --bind 192.168.1.100 --allow 192.168.1.2
 
 # Verbose output (show each message)
-agentmon listen -v
+agentmon listen -v --bind 192.168.1.100
 ```
+
+**Security note:** By default, agentmon only listens on `127.0.0.1` (localhost). For remote log collection, you must explicitly specify `--bind` with your hub's LAN IP. Always use `--allow` to restrict which IPs can send logs.
 
 ## Pi-hole Configuration
 
@@ -269,26 +273,36 @@ sudo systemctl status agentmon-listen
 
 ## Security Considerations
 
-### Use an IP Allowlist
+### Default: Localhost Only
 
-Restrict which IPs can send syslog messages:
+By default, agentmon binds to `127.0.0.1` (localhost only). This is the most secure configuration but only works when:
+- Pi-hole and agentmon run on the same machine, OR
+- You use SSH tunneling or a VPN to forward traffic
 
-```bash
-agentmon listen --port 1514 --allow 192.168.1.2 --allow 192.168.1.3
-```
+### Accepting Remote Connections
 
-### Bind to Specific Interface
-
-Bind to the hub's specific IP instead of all interfaces:
+To receive logs from remote devices, you must explicitly bind to a network interface:
 
 ```bash
-# Replace with your hub's LAN IP
-agentmon listen --bind 192.168.1.100
+# Bind to specific LAN IP (recommended)
+agentmon listen --bind 192.168.1.100 --allow 192.168.1.2 --allow 192.168.1.3
+
+# DANGEROUS: Bind to all interfaces - only use with strict allowlist!
+agentmon listen --bind 0.0.0.0 --allow 192.168.1.2 --allow 192.168.1.3
 ```
 
-This prevents listening on other interfaces (e.g., public-facing NICs).
+**Always use `--allow`** when binding to non-localhost addresses. Without an allowlist, any host that can reach the port can inject fake log messages.
 
-**Note:** If running in WSL2 with port forwarding, `--bind` has limited effect since traffic arrives via the Windows NAT gateway. Use Windows Firewall for access control instead.
+### Why This Matters
+
+An open syslog receiver allows attackers to:
+1. **Inject false alerts** - Distract analysts or hide real attacks
+2. **Fill your database** - Denial of service via disk exhaustion
+3. **Probe your monitoring** - Learn what you're watching for
+
+### WSL2 Note
+
+If running in WSL2 with port forwarding, `--bind` has limited effect since traffic arrives via the Windows NAT gateway. Use Windows Firewall for access control instead.
 
 ### Syslog is Unencrypted
 
