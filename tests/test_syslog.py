@@ -161,7 +161,7 @@ class TestPiholeParser:
         assert event.blocked is True
 
     def test_parse_blocked_no_client(self) -> None:
-        """Test parsing blocked entry without client IP."""
+        """Test parsing blocked entry without client IP returns correlation marker."""
         msg = SyslogMessage(
             timestamp=datetime(2024, 1, 26, 14, 32, 15),
             hostname="pihole",
@@ -173,7 +173,9 @@ class TestPiholeParser:
 
         assert event is not None
         assert event.domain == "ads.tracker.com"
-        assert event.client == "192.168.1.2"  # Falls back to source IP
+        # Special marker indicates this needs correlation with recent query
+        assert event.client == "__BLOCK_NOTIFICATION__"
+        assert event.query_type == "BLOCK"
         assert event.blocked is True
 
     def test_parse_forward_ignored(self) -> None:

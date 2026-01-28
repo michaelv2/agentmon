@@ -133,18 +133,21 @@ class PiholeParser:
                 blocked=True,
             )
 
-        # Blocked pattern without client IP (uses syslog source as fallback)
+        # Blocked pattern without client IP - return domain only for correlation
+        # Pi-hole logs the query and block separately:
+        #   query[A] example.com from 192.168.1.100  (has client)
+        #   gravity blocked example.com is 0.0.0.0   (no client)
+        # The caller should correlate this with the recent query for this domain
         match = DNSMASQ_BLOCKED_NO_CLIENT_PATTERN.match(content)
         if match:
             domain = match.group(1)
-            # Use the hostname from the syslog message as the client identifier
-            # This is a best-effort fallback when client IP isn't in the log line
-            client = msg.source_ip or msg.hostname
+            # Return a special "block notification" that the caller can use
+            # to update a recent query for this domain
             return DNSEvent(
                 timestamp=msg.timestamp,
-                client=client,
+                client="__BLOCK_NOTIFICATION__",  # Special marker
                 domain=domain,
-                query_type="A",
+                query_type="BLOCK",
                 blocked=True,
             )
 

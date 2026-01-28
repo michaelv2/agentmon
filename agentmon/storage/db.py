@@ -241,6 +241,36 @@ class EventStore:
 
         return event_id
 
+    def mark_domain_blocked(self, domain: str, max_age_seconds: int = 5) -> bool:
+        """Mark the most recent query for a domain as blocked.
+
+        Pi-hole logs blocks separately from queries:
+          query[A] example.com from 192.168.1.100
+          gravity blocked example.com is 0.0.0.0
+
+        This method correlates them by updating the recent query.
+
+        Args:
+            domain: The domain that was blocked
+            max_age_seconds: Only update queries within this time window
+
+        Returns:
+            True if a query was updated, False otherwise
+        """
+        result = self.conn.execute("""
+            UPDATE dns_events
+            SET blocked = TRUE
+            WHERE id = (
+                SELECT id FROM dns_events
+                WHERE domain = ?
+                  AND blocked = FALSE
+                  AND timestamp > CURRENT_TIMESTAMP - INTERVAL ? SECOND
+                ORDER BY timestamp DESC
+                LIMIT 1
+            )
+        """, [domain, max_age_seconds])
+        return result.rowcount > 0
+
     def insert_dns_events_batch(self, events: list[DNSEvent]) -> int:
         """Insert multiple DNS events efficiently. Returns count inserted."""
         if not events:

@@ -343,6 +343,14 @@ def listen(
         dns_event, conn_event = route_message(msg)
 
         if dns_event:
+            # Handle block notifications (correlate with recent query)
+            if dns_event.client == "__BLOCK_NOTIFICATION__":
+                # Update the most recent query for this domain to blocked=True
+                updated = store.mark_domain_blocked(dns_event.domain)
+                if updated and verbose:
+                    console.print(f"[yellow]  -> blocked: {dns_event.domain}[/yellow]")
+                return
+
             stats["dns_events"] += 1
             store.insert_dns_event(dns_event)
 
