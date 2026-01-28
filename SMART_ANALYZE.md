@@ -419,12 +419,12 @@ du -h ~/.local/share/agentmon/events.db
    - Enable with `[client_resolver] enabled = true` in config
    - Clear old baseline: `DELETE FROM domain_baseline`
 
-2. **Phase 2: Data Retention** (planned)
-   - Add cleanup methods
-   - Configure retention periods
-   - Run manually first, then enable periodic
-
-3. ~~**Phase 3: Activity Anomaly**~~ **COMPLETE**
+2. ~~**Phase 2: Device Activity Anomaly**~~ **COMPLETE**
    - Implemented in `agentmon/analyzers/device_activity.py`
    - Enable with `[device_activity] enabled = true` in config
    - See `config/agentmon.example.toml` for full configuration options
+
+3. **Phase 3: Data Retention** (planned)
+   - Add cleanup methods
+   - Configure retention periods
+   - Run manually first, then enable periodic
