@@ -210,7 +210,13 @@ CREATE TABLE IF NOT EXISTS device_activity_baseline (
 
 ---
 
-## Part 3: Data Retention Policy
+## Part 3: Data Retention Policy (IMPLEMENTED)
+
+> **Status:** Implemented. See `agentmon/storage/db.py` and `agentmon/cli.py` for the full implementation.
+
+### Overview
+
+Tiered storage model that balances learning needs with disk usage. Raw events are cleaned up automatically while baselines are preserved indefinitely (they're bounded by design).
 
 ### Tiered Storage Model
 
@@ -235,68 +241,21 @@ alerts_days = 90
 cleanup_interval_hours = 24
 ```
 
-### Implementation
+### Key Implementation Files
 
-**Add to `storage/db.py`:**
+| File | Purpose |
+|------|---------|
+| `agentmon/storage/db.py` | `cleanup_old_data()` and `vacuum()` methods |
+| `agentmon/config.py` | Configuration parsing for `[retention]` section |
+| `agentmon/cli.py` | `cleanup` command + periodic cleanup in `listen` |
+| `config/agentmon.example.toml` | Configuration documentation |
 
-```python
-def cleanup_old_data(self, dns_days: int = 30, alerts_days: int = 90) -> dict:
-    """Delete data older than retention periods. Returns counts deleted."""
-    from datetime import timezone
+### How It Works
 
-    dns_cutoff = datetime.now(timezone.utc) - timedelta(days=dns_days)
-    alerts_cutoff = datetime.now(timezone.utc) - timedelta(days=alerts_days)
-
-    # Delete old DNS events
-    dns_result = self.conn.execute("""
-        DELETE FROM dns_events WHERE timestamp < ?
-    """, [dns_cutoff])
-    dns_deleted = dns_result.rowcount
-
-    # Delete old alerts
-    alerts_result = self.conn.execute("""
-        DELETE FROM alerts WHERE timestamp < ?
-    """, [alerts_cutoff])
-    alerts_deleted = alerts_result.rowcount
-
-    # Vacuum to reclaim space (DuckDB)
-    self.conn.execute("VACUUM")
-
-    return {
-        'dns_events_deleted': dns_deleted,
-        'alerts_deleted': alerts_deleted,
-    }
-```
-
-**Add to `cli.py` listen command:**
-
-```python
-import asyncio
-
-async def periodic_cleanup(store: EventStore, interval_hours: int, dns_days: int, alerts_days: int):
-    """Run cleanup periodically."""
-    while True:
-        await asyncio.sleep(interval_hours * 3600)
-        try:
-            result = store.cleanup_old_data(dns_days, alerts_days)
-            logger.info(f"Cleanup complete: {result}")
-        except Exception as e:
-            logger.error(f"Cleanup failed: {e}")
-
-# In listen command:
-if cfg.retention_enabled:
-    # Run cleanup at startup
-    result = store.cleanup_old_data(cfg.retention_dns_days, cfg.retention_alerts_days)
-    click.echo(f"Startup cleanup: deleted {result['dns_events_deleted']} events, {result['alerts_deleted']} alerts")
-
-    # Schedule periodic cleanup
-    asyncio.create_task(periodic_cleanup(
-        store,
-        cfg.retention_cleanup_interval,
-        cfg.retention_dns_days,
-        cfg.retention_alerts_days
-    ))
-```
+1. **Manual Cleanup:** Run `agentmon cleanup` to delete old data on demand
+2. **Startup Cleanup:** When `listen` starts with retention enabled, old data is cleaned
+3. **Periodic Cleanup:** Background task runs every `cleanup_interval_hours`
+4. **VACUUM:** Optional `--vacuum` flag reclaims disk space after deletion
 
 ---
 
@@ -389,17 +348,29 @@ duckdb ~/.local/share/agentmon/events.db \
    WHERE client = '192.168.1.50'"
 ```
 
-### 4. Retention Test
+### 4. Retention Test (IMPLEMENTED)
 
 ```bash
-# Check data size before cleanup
-du -h ~/.local/share/agentmon/events.db
+# 1. Check current data stats
+agentmon cleanup --dry-run
 
-# Force cleanup
+# 2. Run cleanup with custom retention periods
 agentmon cleanup --dns-days 7 --alerts-days 30
 
-# Check data size after
-du -h ~/.local/share/agentmon/events.db
+# 3. Reclaim disk space
+agentmon cleanup --dns-days 7 --alerts-days 30 --vacuum
+
+# 4. Enable automatic cleanup in config
+cat >> ~/.config/agentmon/agentmon.toml << 'EOF'
+[retention]
+enabled = true
+dns_events_days = 30
+alerts_days = 90
+cleanup_interval_hours = 24
+EOF
+
+# 5. Start agentmon - cleanup runs at startup and every 24 hours
+agentmon listen --port 1514
 ```
 
 ---
@@ -409,8 +380,8 @@ du -h ~/.local/share/agentmon/events.db
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Client Identity Resolution | **Implemented** | See `agentmon/resolver.py` |
-| Device Activity Anomaly | **Implemented** | Commit `c34944c` |
-| Data Retention Policy | Planned | Phase 2 |
+| Device Activity Anomaly | **Implemented** | See `agentmon/analyzers/device_activity.py` |
+| Data Retention Policy | **Implemented** | See `agentmon/storage/db.py` |
 
 ## Rollout Plan
 
@@ -424,7 +395,7 @@ du -h ~/.local/share/agentmon/events.db
    - Enable with `[device_activity] enabled = true` in config
    - See `config/agentmon.example.toml` for full configuration options
 
-3. **Phase 3: Data Retention** (planned)
-   - Add cleanup methods
-   - Configure retention periods
-   - Run manually first, then enable periodic
+3. ~~**Phase 3: Data Retention**~~ **COMPLETE**
+   - Implemented in `agentmon/storage/db.py` and `agentmon/cli.py`
+   - Enable with `[retention] enabled = true` in config
+   - Manual cleanup: `agentmon cleanup --dns-days 7 --vacuum`

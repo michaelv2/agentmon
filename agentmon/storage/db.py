@@ -592,3 +592,93 @@ class EventStore:
             "active_hours": active_hours,
             "inactive_hours": inactive_hours,
         }
+
+    # =========================================================================
+    # Data Retention / Cleanup Methods
+    # =========================================================================
+
+    def cleanup_old_data(
+        self,
+        dns_events_days: int = 30,
+        alerts_days: int = 90,
+    ) -> dict[str, int]:
+        """Delete data older than retention periods.
+
+        Args:
+            dns_events_days: Delete DNS events older than this many days
+            alerts_days: Delete alerts older than this many days
+
+        Returns:
+            Dict with counts of deleted records
+        """
+        dns_cutoff = datetime.now(timezone.utc) - timedelta(days=dns_events_days)
+        alerts_cutoff = datetime.now(timezone.utc) - timedelta(days=alerts_days)
+
+        # Delete old DNS events
+        dns_result = self.conn.execute("""
+            DELETE FROM dns_events WHERE timestamp < ?
+        """, [dns_cutoff])
+        dns_deleted = dns_result.rowcount
+
+        # Delete old alerts
+        alerts_result = self.conn.execute("""
+            DELETE FROM alerts WHERE timestamp < ?
+        """, [alerts_cutoff])
+        alerts_deleted = alerts_result.rowcount
+
+        return {
+            "dns_events_deleted": dns_deleted,
+            "alerts_deleted": alerts_deleted,
+        }
+
+    def vacuum(self) -> None:
+        """Reclaim disk space after deletions."""
+        self.conn.execute("VACUUM")
+
+    def get_table_stats(self) -> dict[str, dict]:
+        """Get row counts and date ranges for main tables.
+
+        Returns:
+            Dict with table names as keys, containing count, oldest, and newest dates.
+        """
+        stats = {}
+
+        # DNS events
+        result = self.conn.execute("""
+            SELECT COUNT(*), MIN(timestamp), MAX(timestamp)
+            FROM dns_events
+        """).fetchone()
+        stats["dns_events"] = {
+            "count": result[0] if result else 0,
+            "oldest": result[1] if result else None,
+            "newest": result[2] if result else None,
+        }
+
+        # Alerts
+        result = self.conn.execute("""
+            SELECT COUNT(*), MIN(timestamp), MAX(timestamp)
+            FROM alerts
+        """).fetchone()
+        stats["alerts"] = {
+            "count": result[0] if result else 0,
+            "oldest": result[1] if result else None,
+            "newest": result[2] if result else None,
+        }
+
+        # Domain baseline (bounded, no date range)
+        result = self.conn.execute("""
+            SELECT COUNT(*) FROM domain_baseline
+        """).fetchone()
+        stats["domain_baseline"] = {
+            "count": result[0] if result else 0,
+        }
+
+        # Device activity baseline (bounded, no date range)
+        result = self.conn.execute("""
+            SELECT COUNT(*) FROM device_activity_baseline
+        """).fetchone()
+        stats["device_activity_baseline"] = {
+            "count": result[0] if result else 0,
+        }
+
+        return stats

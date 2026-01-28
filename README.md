@@ -10,6 +10,7 @@ Network agent activity monitor and auditor. Detects anomalous DNS activity from 
 - **LLM classification** - Two-tier Ollama integration for intelligent domain analysis
 - **Device activity anomaly** - Learns normal activity hours per device, alerts on off-hours activity
 - **Parental controls** - Time-based content filtering with category blocking
+- **Data retention** - Automatic cleanup of old events with configurable retention periods
 - **Slack alerts** - Real-time webhook notifications with severity filtering
 - **Syslog receiver** - Push-based collection from edge devices (no credentials on hub)
 
@@ -117,7 +118,7 @@ ignore_suffixes = [
 
 ### LLM classification
 
-Requires [Ollama](https://ollama.ai) running locally.
+Requires [Ollama](https://ollama.ai) running locally or on a remote host.
 
 ```toml
 [llm]
@@ -137,6 +138,10 @@ escalation_confidence_threshold = 0.7
 Enable at runtime with `--llm` flag:
 
 ```bash
+agentmon listen --llm
+
+# For remote Ollama server, set OLLAMA_HOST before running:
+export OLLAMA_HOST="your_ollama_host:11434"
 agentmon listen --llm
 ```
 
@@ -186,6 +191,26 @@ always_active = true  # Skip anomaly detection for 24/7 devices
 
 **Example:** If `alice-laptop` is normally active from 7am-10pm and suddenly starts querying DNS at 3:15 AM, an alert is generated: "Unusual activity: alice-laptop active at 03:00".
 
+### Data retention
+
+Automatically cleans up old data to manage disk usage. Baselines are not affected (they're bounded by design).
+
+```toml
+[retention]
+enabled = true
+
+# Keep raw DNS events for 30 days
+dns_events_days = 30
+
+# Keep alerts for 90 days
+alerts_days = 90
+
+# Run cleanup at startup and every 24 hours
+cleanup_interval_hours = 24
+```
+
+Manual cleanup: `agentmon cleanup --dns-days 7 --alerts-days 30 --vacuum`
+
 ### Slack notifications
 
 ```toml
@@ -224,6 +249,7 @@ agentmon collect --host pihole.local --learning
 | `agentmon stats` | Show DNS query statistics per client |
 | `agentmon alerts` | Show unacknowledged security alerts |
 | `agentmon baseline` | Show learned baseline statistics |
+| `agentmon cleanup` | Clean up old data per retention policy |
 
 ### Listen options
 

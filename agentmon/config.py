@@ -97,6 +97,12 @@ class Config:
     resolver_strip_suffix: bool = True
     resolver_mappings: dict[str, str] = field(default_factory=dict)
 
+    # Data Retention Policy
+    retention_enabled: bool = False
+    retention_dns_events_days: int = 30
+    retention_alerts_days: int = 90
+    retention_cleanup_interval_hours: int = 24
+
 
 def load_config(config_path: Optional[Path] = None) -> Config:
     """Load configuration from TOML file.
@@ -285,6 +291,18 @@ def load_config(config_path: Optional[Path] = None) -> Config:
                 name = mapping.get("name")
                 if ip and name:
                     config.resolver_mappings[ip] = name
+
+    # Data Retention Policy section
+    if "retention" in data:
+        ret = data["retention"]
+        if "enabled" in ret:
+            config.retention_enabled = ret["enabled"]
+        if "dns_events_days" in ret:
+            config.retention_dns_events_days = ret["dns_events_days"]
+        if "alerts_days" in ret:
+            config.retention_alerts_days = ret["alerts_days"]
+        if "cleanup_interval_hours" in ret:
+            config.retention_cleanup_interval_hours = ret["cleanup_interval_hours"]
 
     return config
 

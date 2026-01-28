@@ -319,3 +319,28 @@ name = "nas"
 # [[client_resolver.mappings]]
 # ip = "192.168.1.200"
 # name = "iot-hub"
+
+# =============================================================================
+# DATA RETENTION POLICY
+# =============================================================================
+# Automatically clean up old data to manage disk usage.
+#
+# Tiered storage model:
+#   - Raw DNS events: Short retention (investigation, debugging)
+#   - Alerts: Medium retention (incident history)
+#   - Baselines: Indefinite (bounded by design - max 168 rows per device)
+#
+# Cleanup runs at startup and then periodically.
+
+[retention]
+enabled = false
+
+# Raw DNS events - keep for investigation/debugging
+# These grow fastest - 1000s of events per day is typical
+dns_events_days = 30
+
+# Alerts - keep for incident history and trend analysis
+alerts_days = 90
+
+# Run cleanup at startup and then every N hours
+cleanup_interval_hours = 24

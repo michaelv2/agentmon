@@ -271,6 +271,77 @@ def baseline(ctx: click.Context) -> None:
 
 
 @main.command()
+@click.option("--dns-days", type=int, default=None, help="Delete DNS events older than N days (default: 30)")
+@click.option("--alerts-days", type=int, default=None, help="Delete alerts older than N days (default: 90)")
+@click.option("--vacuum", is_flag=True, help="Run VACUUM after cleanup to reclaim disk space")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted without actually deleting")
+@click.pass_context
+def cleanup(
+    ctx: click.Context,
+    dns_days: int | None,
+    alerts_days: int | None,
+    vacuum: bool,
+    dry_run: bool,
+) -> None:
+    """Clean up old data according to retention policy.
+
+    Deletes DNS events and alerts older than the specified retention periods.
+    Baseline tables (domain_baseline, device_activity_baseline) are not affected
+    as they are bounded by design.
+
+    Example:
+        agentmon cleanup --dns-days 7 --alerts-days 30 --vacuum
+    """
+    cfg = ctx.obj["config"]
+    db_path: Path = ctx.obj["db_path"]
+
+    # Use config values if not specified on CLI
+    dns_retention = dns_days if dns_days is not None else cfg.retention_dns_events_days
+    alerts_retention = alerts_days if alerts_days is not None else cfg.retention_alerts_days
+
+    with EventStore(db_path) as store:
+        # Show current stats
+        stats = store.get_table_stats()
+
+        console.print("[cyan]Current data:[/cyan]")
+        console.print(f"  DNS events: {stats['dns_events']['count']:,} rows")
+        if stats['dns_events']['oldest']:
+            oldest = stats['dns_events']['oldest']
+            if isinstance(oldest, datetime):
+                oldest_str = oldest.strftime("%Y-%m-%d")
+            else:
+                oldest_str = str(oldest)[:10]
+            console.print(f"    Oldest: {oldest_str}")
+        console.print(f"  Alerts: {stats['alerts']['count']:,} rows")
+        if stats['alerts']['oldest']:
+            oldest = stats['alerts']['oldest']
+            if isinstance(oldest, datetime):
+                oldest_str = oldest.strftime("%Y-%m-%d")
+            else:
+                oldest_str = str(oldest)[:10]
+            console.print(f"    Oldest: {oldest_str}")
+        console.print(f"  Domain baseline: {stats['domain_baseline']['count']:,} rows (not cleaned)")
+        console.print(f"  Activity baseline: {stats['device_activity_baseline']['count']:,} rows (not cleaned)")
+        console.print()
+
+        if dry_run:
+            console.print(f"[yellow]Dry run: would delete DNS events older than {dns_retention} days[/yellow]")
+            console.print(f"[yellow]Dry run: would delete alerts older than {alerts_retention} days[/yellow]")
+            return
+
+        console.print(f"[cyan]Cleaning up (DNS: {dns_retention}d, Alerts: {alerts_retention}d)...[/cyan]")
+        result = store.cleanup_old_data(dns_retention, alerts_retention)
+
+        console.print(f"[green]Deleted {result['dns_events_deleted']:,} DNS events[/green]")
+        console.print(f"[green]Deleted {result['alerts_deleted']:,} alerts[/green]")
+
+        if vacuum:
+            console.print("[cyan]Running VACUUM to reclaim disk space...[/cyan]")
+            store.vacuum()
+            console.print("[green]VACUUM complete[/green]")
+
+
+@main.command()
 @click.option("--port", type=int, default=None, help="Port to listen on (default: 1514)")
 @click.option(
     "--protocol",
@@ -519,9 +590,42 @@ def listen(
         console.print(f"  Connection events: {stats['connection_events']:,}")
         console.print(f"  Alerts generated: {stats['alerts']:,}")
 
+    async def periodic_cleanup() -> None:
+        """Run cleanup periodically."""
+        interval_seconds = cfg.retention_cleanup_interval_hours * 3600
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                result = store.cleanup_old_data(
+                    cfg.retention_dns_events_days,
+                    cfg.retention_alerts_days,
+                )
+                if result["dns_events_deleted"] > 0 or result["alerts_deleted"] > 0:
+                    console.print(
+                        f"[dim]Cleanup: deleted {result['dns_events_deleted']} events, "
+                        f"{result['alerts_deleted']} alerts[/dim]"
+                    )
+            except Exception as e:
+                console.print(f"[red]Cleanup error: {e}[/red]")
+
     async def run() -> None:
         """Run the syslog receiver."""
         receiver = SyslogReceiver(syslog_config, handle_message)
+
+        # Run startup cleanup if retention is enabled
+        if cfg.retention_enabled:
+            try:
+                result = store.cleanup_old_data(
+                    cfg.retention_dns_events_days,
+                    cfg.retention_alerts_days,
+                )
+                if result["dns_events_deleted"] > 0 or result["alerts_deleted"] > 0:
+                    console.print(
+                        f"[cyan]Startup cleanup: deleted {result['dns_events_deleted']} events, "
+                        f"{result['alerts_deleted']} alerts[/cyan]"
+                    )
+            except Exception as e:
+                console.print(f"[yellow]Startup cleanup failed: {e}[/yellow]")
 
         console.print(f"[green]Starting syslog receiver on {syslog_bind}:{syslog_port} ({syslog_protocol})[/green]")
         if use_learning:
@@ -550,14 +654,31 @@ def listen(
                 f"strip_suffix={cfg.resolver_strip_suffix}, "
                 f"{mapping_count} explicit mappings[/cyan]"
             )
+        if cfg.retention_enabled:
+            console.print(
+                f"[cyan]Retention: dns_events={cfg.retention_dns_events_days}d, "
+                f"alerts={cfg.retention_alerts_days}d, "
+                f"interval={cfg.retention_cleanup_interval_hours}h[/cyan]"
+            )
         console.print("[dim]Press Ctrl+C to stop[/dim]")
         console.print()
+
+        # Start periodic cleanup task if retention is enabled
+        cleanup_task = None
+        if cfg.retention_enabled:
+            cleanup_task = asyncio.create_task(periodic_cleanup())
 
         try:
             await receiver.run_forever()
         except asyncio.CancelledError:
             pass
         finally:
+            if cleanup_task:
+                cleanup_task.cancel()
+                try:
+                    await cleanup_task
+                except asyncio.CancelledError:
+                    pass
             if slack_notifier:
                 await slack_notifier.close()
             if device_activity_analyzer:
