@@ -27,10 +27,14 @@ port = 1514
 # TCP provides reliable delivery with no gaps in audit trail
 protocol = "tcp"
 
-# Bind address (use specific IP to restrict access, or 0.0.0.0 for all)
-bind_address = "0.0.0.0"
+# SECURITY: Bind address controls which network interfaces accept connections
+# - "127.0.0.1" (default): Localhost only - most secure, requires local forwarding
+# - Specific IP (e.g., "192.168.1.100"): Only that interface - recommended for remote
+# - "0.0.0.0": All interfaces - use only with allowed_ips or firewall rules
+bind_address = "127.0.0.1"
 
-# Optional: IP allowlist (empty = accept from all sources)
+# SECURITY: IP allowlist - REQUIRED when bind_address is not localhost
+# Empty list accepts from all sources (dangerous with 0.0.0.0!)
 # allowed_ips = ["192.168.1.2", "192.168.1.3"]
 
 [analyzer]
@@ -42,6 +46,10 @@ entropy_min_length = 10
 
 # Learning mode: only build baseline, don't generate alerts
 learning_mode = false
+
+# Alert deduplication: suppress repeat alerts for same (domain, client, type)
+# within this window (seconds). Set to 0 to disable.
+alert_dedup_window = 600  # 10 minutes
 
 # Known-bad domain patterns (substring match, case-insensitive)
 # Organized by threat category - customize for your environment
@@ -122,7 +130,7 @@ enabled = false
 
 # Two-tier classification: fast triage, thorough escalation
 # Triage model runs on every alert; escalation only for suspicious results
-triage_model = "gpt-oss:20b"
+triage_model = "phi3:3.8b"
 escalation_model = "gpt-oss:20b"
 
 # Escalate when triage returns these categories
@@ -131,10 +139,138 @@ escalation_categories = ["suspicious", "likely_malicious", "dga", "unknown"]
 # Also escalate when triage confidence is below this threshold
 escalation_confidence_threshold = 0.7
 
+# Downgrade alert severity when LLM classifies domain as benign
+# Reduces false positives from heuristic detection (DGA, known-bad patterns)
+# Categories: benign/cdn/cloud_provider/api_service → INFO
+#             advertising/tracking → LOW
+downgrade_enabled = true
+downgrade_confidence = 0.8  # Minimum confidence to trust downgrade
+
 [alerting]
 # Minimum severity to alert on
 min_severity = "low"  # info, low, medium, high, critical
 
-# Future: webhook, email, ntfy integration
-# webhook_url = ""
-# ntfy_topic = ""
+[slack]
+# Slack incoming webhook for alert notifications
+enabled = false
+
+# Webhook URL from Slack App configuration
+# Create at: https://api.slack.com/apps → Incoming Webhooks
+# webhook_url = "https://hooks.slack.com/services/T.../B.../xxx"
+
+# Minimum severity to notify (info, low, medium, high, critical)
+min_severity = "medium"
+
+# =============================================================================
+# PARENTAL CONTROLS
+# =============================================================================
+# Alert when children access restricted content during specified hours.
+# Works alongside security monitoring - both run simultaneously.
+
+[parental_controls]
+enabled = false
+
+# Map devices (by IP) to policies
+# Each device can have one policy; multiple IPs can map to the same device
+
+[[parental_controls.devices]]
+name = "alice-laptop"
+client_ips = ["192.168.1.50"]
+policy = "homework"
+
+[[parental_controls.devices]]
+name = "bob-gaming"
+client_ips = ["192.168.1.51"]
+policy = "after-school"
+
+# Define policies
+# Each policy specifies blocked categories, allowed domains, and time rules
+
+[parental_controls.policies.homework]
+description = "Strict during homework hours 3-5pm weekdays"
+blocked_categories = ["games", "social_media", "video", "ai_tools"]
+allowed_domains = ["wikipedia.org", "khanacademy.org", "desmos.com"]
+alert_severity = "high"
+
+[[parental_controls.policies.homework.time_rules]]
+start = "15:00"
+end = "17:00"
+days = ["mon", "tue", "wed", "thu", "fri"]
+
+[parental_controls.policies.after-school]
+description = "Gaming allowed 6-8pm on weekends only"
+blocked_categories = ["social_media", "ai_tools"]
+alert_severity = "medium"
+
+[[parental_controls.policies.after-school.time_rules]]
+start = "18:00"
+end = "20:00"
+days = ["sat", "sun"]
+# If allowed_categories is set, ONLY these categories are allowed during this window
+allowed_categories = ["games", "entertainment", "educational"]
+
+# Available categories for blocking/allowing:
+#   games        - Roblox, Fortnite, Minecraft, Steam, etc.
+#   social_media - TikTok, Instagram, Discord, Reddit, etc.
+#   ai_tools     - ChatGPT, Claude, Copilot, Midjourney, etc.
+#   video        - YouTube, Netflix, Twitch, etc.
+#   educational  - Wikipedia, Khan Academy, Coursera, etc.
+#   shopping     - Amazon, eBay, etc.
+#   news         - CNN, BBC, NYTimes, etc.
+
+# =============================================================================
+# DEVICE ACTIVITY ANOMALY DETECTION
+# =============================================================================
+# Learns each device's normal activity hours and alerts when activity occurs
+# outside those patterns - without requiring hard-coded time rules.
+#
+# This is COMPLEMENTARY to parental controls:
+#   - Parental controls: Hard-coded rules ("block games 3-5pm")
+#   - Device activity: Learned baseline ("alert if active at 3am")
+#
+# Example use case:
+#   Device 192.168.1.50 normally shows DNS activity from 7am-10pm on weekdays.
+#   At 3:15 AM on Tuesday, it suddenly starts querying domains.
+#   → Alert: "Unusual activity: alice-laptop active at 03:00"
+
+[device_activity]
+enabled = false
+
+# Learning period before generating alerts (days)
+# During this period, the system observes activity patterns without alerting.
+# Recommended: 14 days to capture both weekday and weekend patterns.
+learning_days = 14
+
+# Minimum queries in an hour to consider a device "active"
+# Lower values are more sensitive but may increase false positives.
+activity_threshold = 5
+
+# Minimum samples per time slot before detecting anomalies
+# Requires at least this many observations of a time slot before alerting.
+min_samples = 7
+
+# Alert severity for activity anomalies
+alert_severity = "medium"
+
+# Named devices for better alert messages
+# Each device can have a friendly name and be marked as "always_active"
+# to skip anomaly detection (useful for servers, NAS, etc.)
+
+[[device_activity.devices]]
+name = "alice-laptop"
+client_ips = ["192.168.1.50"]
+
+[[device_activity.devices]]
+name = "bob-phone"
+client_ips = ["192.168.1.51", "192.168.1.52"]  # Multiple IPs (DHCP)
+
+[[device_activity.devices]]
+name = "media-server"
+client_ips = ["192.168.1.100"]
+# Servers expected to be active 24/7 - don't alert on off-hours activity
+always_active = true
+
+[[device_activity.devices]]
+name = "nas"
+client_ips = ["192.168.1.101"]
+always_active = true

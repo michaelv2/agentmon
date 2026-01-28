@@ -16,6 +16,7 @@ from agentmon.collectors import PiholeCollector
 from agentmon.collectors.pihole import PiholeConfig
 from agentmon.config import load_config, find_config_file
 from agentmon.models import Severity
+from agentmon.policies import DeviceManager, ParentalControlAnalyzer
 from agentmon.storage import EventStore
 
 console = Console()
@@ -282,7 +283,7 @@ def baseline(ctx: click.Context) -> None:
 @click.option("--learning", is_flag=True, default=None, help="Learning mode: build baseline without alerting")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output (show each message)")
 @click.option("--llm", is_flag=True, default=None, help="Enable LLM classification via Ollama")
-@click.option("--llm-triage", type=str, default=None, help="Fast triage model (default: gpt-oss:20b)")
+@click.option("--llm-triage", type=str, default=None, help="Fast triage model (default: phi3:3.8b)")
 @click.option("--llm-escalation", type=str, default=None, help="Thorough escalation model (default: gpt-oss:20b)")
 @click.pass_context
 def listen(
@@ -372,8 +373,42 @@ def listen(
         ignore_suffixes=cfg.ignore_suffixes,
         entropy_threshold=cfg.entropy_threshold,
         entropy_min_length=cfg.entropy_min_length,
+        alert_dedup_window=cfg.alert_dedup_window,
     )
     analyzer = DNSBaselineAnalyzer(store, analyzer_config)
+
+    # Initialize Slack notifier if configured
+    slack_notifier = None
+    if cfg.slack_enabled and cfg.slack_webhook_url:
+        from agentmon.notifiers.slack import SlackNotifier, SlackConfig
+
+        slack_config = SlackConfig(
+            webhook_url=cfg.slack_webhook_url,
+            min_severity=Severity(cfg.slack_min_severity),
+            enabled=True,
+        )
+        slack_notifier = SlackNotifier(slack_config)
+
+    # Initialize parental control analyzer if configured
+    parental_analyzer = None
+    if cfg.parental_controls_enabled and cfg.parental_devices and cfg.parental_policies:
+        device_manager = DeviceManager(cfg.parental_devices, cfg.parental_policies)
+        parental_analyzer = ParentalControlAnalyzer(device_manager)
+
+    # Initialize device activity analyzer if configured
+    device_activity_analyzer = None
+    if cfg.device_activity_enabled:
+        from agentmon.analyzers.device_activity import DeviceActivityAnalyzer, DeviceActivityConfig
+
+        activity_config = DeviceActivityConfig(
+            enabled=True,
+            learning_days=cfg.device_activity_learning_days,
+            activity_threshold=cfg.device_activity_threshold,
+            min_samples=cfg.device_activity_min_samples,
+            alert_severity=Severity(cfg.device_activity_severity),
+            devices=cfg.device_activity_devices,
+        )
+        device_activity_analyzer = DeviceActivityAnalyzer(store, activity_config)
 
     def handle_message(msg: SyslogMessage) -> None:
         """Process a received syslog message."""
@@ -401,8 +436,19 @@ def listen(
             stats["dns_events"] += 1
             store.insert_dns_event(dns_event)
 
-            # Analyze for threats
+            # Analyze for threats (security)
             alerts = analyzer.analyze_event(dns_event)
+
+            # Analyze for parental control violations
+            if parental_analyzer:
+                pc_alerts = parental_analyzer.analyze_event(dns_event)
+                alerts.extend(pc_alerts)
+
+            # Analyze for device activity anomalies
+            if device_activity_analyzer:
+                activity_alerts = device_activity_analyzer.analyze_event(dns_event)
+                alerts.extend(activity_alerts)
+
             for alert in alerts:
                 stats["alerts"] += 1
                 store.insert_alert(alert)
@@ -419,6 +465,10 @@ def listen(
                 )
                 if alert.llm_analysis:
                     console.print(f"  [dim]LLM: {alert.llm_analysis}[/dim]")
+
+                # Send to Slack (fire-and-forget, don't block)
+                if slack_notifier:
+                    asyncio.get_event_loop().create_task(slack_notifier.send_alert(alert))
 
         if conn_event:
             stats["connection_events"] += 1
@@ -449,6 +499,19 @@ def listen(
             console.print(f"[cyan]LLM triage: {use_triage} → escalation: {use_escalation}[/cyan]")
         if syslog_allowed:
             console.print(f"[cyan]Allowed IPs: {', '.join(syslog_allowed)}[/cyan]")
+        if slack_notifier:
+            console.print(f"[cyan]Slack notifications: {cfg.slack_min_severity}+ severity[/cyan]")
+        if parental_analyzer:
+            device_count = len(cfg.parental_devices)
+            policy_count = len(cfg.parental_policies)
+            console.print(f"[cyan]Parental controls: {device_count} devices, {policy_count} policies[/cyan]")
+        if device_activity_analyzer:
+            device_count = len(cfg.device_activity_devices)
+            console.print(
+                f"[cyan]Device activity: learning={cfg.device_activity_learning_days}d, "
+                f"threshold={cfg.device_activity_threshold}q/h, "
+                f"{device_count} named devices[/cyan]"
+            )
         console.print("[dim]Press Ctrl+C to stop[/dim]")
         console.print()
 
@@ -457,6 +520,10 @@ def listen(
         except asyncio.CancelledError:
             pass
         finally:
+            if slack_notifier:
+                await slack_notifier.close()
+            if device_activity_analyzer:
+                device_activity_analyzer.flush()
             store.close()
             print_stats()
 

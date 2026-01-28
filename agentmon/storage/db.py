@@ -9,7 +9,7 @@ DuckDB is chosen for:
 
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import uuid
@@ -19,7 +19,7 @@ import duckdb
 from agentmon.models import DNSEvent, ConnectionEvent, Alert, Severity
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class EventStore:
@@ -194,6 +194,20 @@ class EventStore:
             )
         """)
 
+        # Device activity baseline table (for activity anomaly detection)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS device_activity_baseline (
+                client VARCHAR NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                hour_of_day INTEGER NOT NULL,
+                query_count INTEGER DEFAULT 0,
+                active_count INTEGER DEFAULT 0,
+                sample_count INTEGER DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (client, day_of_week, hour_of_day)
+            )
+        """)
+
         # Create indexes for common queries
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_dns_timestamp
@@ -210,6 +224,10 @@ class EventStore:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_alerts_severity_ack
             ON alerts (severity, acknowledged)
+        """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_device_activity_client
+            ON device_activity_baseline (client)
         """)
 
     def insert_dns_event(self, event: DNSEvent) -> str:
@@ -257,19 +275,20 @@ class EventStore:
         Returns:
             True if a query was updated, False otherwise
         """
-        # Note: DuckDB doesn't support parameterized INTERVAL, so we use f-string
-        result = self.conn.execute(f"""
+        # Use datetime arithmetic instead of f-string interpolation for safety
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+        result = self.conn.execute("""
             UPDATE dns_events
             SET blocked = TRUE
             WHERE id = (
                 SELECT id FROM dns_events
                 WHERE domain = ?
                   AND blocked = FALSE
-                  AND timestamp > CURRENT_TIMESTAMP - INTERVAL {int(max_age_seconds)} SECOND
+                  AND timestamp > ?
                 ORDER BY timestamp DESC
                 LIMIT 1
             )
-        """, [domain])
+        """, [domain, cutoff_time])
         return result.rowcount > 0
 
     def insert_dns_events_batch(self, events: list[DNSEvent]) -> int:
@@ -403,8 +422,9 @@ class EventStore:
 
     def get_client_stats(self, hours: int = 24) -> list[dict]:
         """Get DNS query statistics per client for the last N hours."""
-        # DuckDB doesn't support parameterized INTERVAL, so we interpolate safely
-        result = self.conn.execute(f"""
+        # Use datetime arithmetic instead of f-string interpolation for safety
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+        result = self.conn.execute("""
             SELECT
                 client,
                 COUNT(*) as total_queries,
@@ -413,11 +433,162 @@ class EventStore:
                 MIN(timestamp) as first_query,
                 MAX(timestamp) as last_query
             FROM dns_events
-            WHERE timestamp > CURRENT_TIMESTAMP - INTERVAL {int(hours)} HOUR
+            WHERE timestamp > ?
             GROUP BY client
             ORDER BY total_queries DESC
-        """).fetchall()
+        """, [cutoff_time]).fetchall()
 
         columns = ["client", "total_queries", "unique_domains",
                    "blocked_queries", "first_query", "last_query"]
         return [dict(zip(columns, row)) for row in result]
+
+    # =========================================================================
+    # Device Activity Baseline Methods
+    # =========================================================================
+
+    def update_device_activity(
+        self,
+        client: str,
+        day_of_week: int,
+        hour_of_day: int,
+        query_count: int,
+        was_active: bool,
+    ) -> None:
+        """Update activity baseline for a device at a specific time slot.
+
+        Args:
+            client: Device IP address
+            day_of_week: 0=Monday through 6=Sunday
+            hour_of_day: 0-23
+            query_count: Number of queries in this hour
+            was_active: Whether the device exceeded the activity threshold
+        """
+        active_increment = 1 if was_active else 0
+        now = datetime.now(timezone.utc)
+        self.conn.execute("""
+            INSERT INTO device_activity_baseline
+                (client, day_of_week, hour_of_day, query_count, active_count, sample_count, last_updated)
+            VALUES (?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT (client, day_of_week, hour_of_day) DO UPDATE SET
+                query_count = device_activity_baseline.query_count + EXCLUDED.query_count,
+                active_count = device_activity_baseline.active_count + ?,
+                sample_count = device_activity_baseline.sample_count + 1,
+                last_updated = ?
+        """, [client, day_of_week, hour_of_day, query_count, active_increment, now, active_increment, now])
+
+    def get_device_activity_baseline(
+        self,
+        client: str,
+        day_of_week: int,
+        hour_of_day: int,
+    ) -> Optional[dict]:
+        """Get baseline for a specific time slot.
+
+        Args:
+            client: Device IP address
+            day_of_week: 0=Monday through 6=Sunday
+            hour_of_day: 0-23
+
+        Returns:
+            Dict with query_count, active_count, sample_count, or None if no data
+        """
+        result = self.conn.execute("""
+            SELECT query_count, active_count, sample_count, last_updated
+            FROM device_activity_baseline
+            WHERE client = ? AND day_of_week = ? AND hour_of_day = ?
+        """, [client, day_of_week, hour_of_day]).fetchone()
+
+        if result is None:
+            return None
+
+        return {
+            "query_count": result[0],
+            "active_count": result[1],
+            "sample_count": result[2],
+            "last_updated": result[3],
+        }
+
+    def get_device_first_activity(self, client: str) -> Optional[datetime]:
+        """Get when a device was first observed (earliest last_updated).
+
+        Used to determine if the device has passed the learning period.
+        """
+        result = self.conn.execute("""
+            SELECT MIN(last_updated) FROM device_activity_baseline
+            WHERE client = ?
+        """, [client]).fetchone()
+        return result[0] if result and result[0] else None
+
+    def is_device_activity_anomalous(
+        self,
+        client: str,
+        day_of_week: int,
+        hour_of_day: int,
+        min_samples: int = 7,
+    ) -> tuple[bool, float]:
+        """Check if current activity is anomalous for this time slot.
+
+        An anomaly is detected when the device is active during a time slot
+        where it's historically rarely active (low active_ratio).
+
+        Args:
+            client: Device IP address
+            day_of_week: 0=Monday through 6=Sunday
+            hour_of_day: 0-23
+            min_samples: Minimum observations required before detecting anomalies
+
+        Returns:
+            Tuple of (is_anomaly, active_ratio) where active_ratio is how often
+            this device is active during this time slot (0.0 to 1.0).
+            Returns (False, 0.0) if insufficient data.
+        """
+        baseline = self.get_device_activity_baseline(client, day_of_week, hour_of_day)
+
+        if baseline is None or baseline["sample_count"] < min_samples:
+            # Not enough data to determine anomaly
+            return (False, 0.0)
+
+        active_ratio = baseline["active_count"] / baseline["sample_count"]
+
+        # If device is rarely active (<10% of the time) in this slot,
+        # and it's now active, that's anomalous
+        if active_ratio < 0.1:
+            return (True, active_ratio)
+
+        return (False, active_ratio)
+
+    def get_device_activity_summary(self, client: str) -> dict:
+        """Get a summary of a device's activity patterns.
+
+        Returns:
+            Dict with total_samples, active_hours (list of typically active hours),
+            and inactive_hours (list of typically inactive hours).
+        """
+        result = self.conn.execute("""
+            SELECT day_of_week, hour_of_day, active_count, sample_count
+            FROM device_activity_baseline
+            WHERE client = ?
+            ORDER BY day_of_week, hour_of_day
+        """, [client]).fetchall()
+
+        if not result:
+            return {"total_samples": 0, "active_hours": [], "inactive_hours": []}
+
+        total_samples = sum(row[3] for row in result)
+        active_hours = []
+        inactive_hours = []
+
+        for day, hour, active_count, sample_count in result:
+            if sample_count >= 7:  # Minimum samples for reliable ratio
+                ratio = active_count / sample_count
+                slot = {"day": day, "hour": hour, "ratio": ratio}
+                if ratio >= 0.5:
+                    active_hours.append(slot)
+                elif ratio < 0.1:
+                    inactive_hours.append(slot)
+
+        return {
+            "total_samples": total_samples,
+            "active_hours": active_hours,
+            "inactive_hours": inactive_hours,
+        }

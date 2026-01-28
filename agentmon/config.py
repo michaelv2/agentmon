@@ -10,6 +10,9 @@ from typing import Any, Optional
 
 import tomli
 
+from agentmon.models import Severity
+from agentmon.policies.models import Device, ParentalPolicy, TimeRule
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,7 +48,7 @@ class Config:
     # Syslog
     syslog_port: int = 1514
     syslog_protocol: str = "tcp"
-    syslog_bind_address: str = "0.0.0.0"
+    syslog_bind_address: str = "127.0.0.1"  # Localhost only by default for security
     syslog_allowed_ips: list[str] = field(default_factory=list)
 
     # Analyzer
@@ -57,14 +60,35 @@ class Config:
     ignore_suffixes: list[str] = field(default_factory=lambda: [
         ".local", ".lan", ".home", ".internal", ".localdomain", ".arpa"
     ])
+    alert_dedup_window: int = 600  # 10 minutes
 
     # LLM (two-tier)
     llm_enabled: bool = False
-    llm_triage_model: str = "gpt-oss:20b"
+    llm_triage_model: str = "phi3:3.8b"
     llm_escalation_model: str = "gpt-oss:20b"
+    llm_downgrade_enabled: bool = True
+    llm_downgrade_confidence: float = 0.8
 
     # Alerting
     min_severity: str = "low"
+
+    # Slack
+    slack_enabled: bool = False
+    slack_webhook_url: Optional[str] = None
+    slack_min_severity: str = "medium"
+
+    # Parental Controls
+    parental_controls_enabled: bool = False
+    parental_devices: list[Device] = field(default_factory=list)
+    parental_policies: dict[str, ParentalPolicy] = field(default_factory=dict)
+
+    # Device Activity Anomaly Detection
+    device_activity_enabled: bool = False
+    device_activity_learning_days: int = 14
+    device_activity_threshold: int = 5
+    device_activity_min_samples: int = 7
+    device_activity_severity: str = "medium"
+    device_activity_devices: list[dict] = field(default_factory=list)
 
 
 def load_config(config_path: Optional[Path] = None) -> Config:
@@ -128,6 +152,8 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.allowlist = set(analyzer["allowlist"])
         if "ignore_suffixes" in analyzer:
             config.ignore_suffixes = analyzer["ignore_suffixes"]
+        if "alert_dedup_window" in analyzer:
+            config.alert_dedup_window = analyzer["alert_dedup_window"]
 
     # LLM section
     if "llm" in data:
@@ -142,12 +168,96 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         if "model" in llm and "triage_model" not in llm:
             config.llm_triage_model = llm["model"]
             config.llm_escalation_model = llm["model"]
+        if "downgrade_enabled" in llm:
+            config.llm_downgrade_enabled = llm["downgrade_enabled"]
+        if "downgrade_confidence" in llm:
+            config.llm_downgrade_confidence = llm["downgrade_confidence"]
 
     # Alerting section
     if "alerting" in data:
         alerting = data["alerting"]
         if "min_severity" in alerting:
             config.min_severity = alerting["min_severity"]
+
+    # Slack section
+    if "slack" in data:
+        slack = data["slack"]
+        if "enabled" in slack:
+            config.slack_enabled = slack["enabled"]
+        if "webhook_url" in slack:
+            config.slack_webhook_url = slack["webhook_url"]
+        if "min_severity" in slack:
+            config.slack_min_severity = slack["min_severity"]
+
+    # Parental Controls section
+    if "parental_controls" in data:
+        pc = data["parental_controls"]
+        if "enabled" in pc:
+            config.parental_controls_enabled = pc["enabled"]
+
+        # Parse policies first (devices reference them by name)
+        if "policies" in pc:
+            for policy_name, policy_data in pc["policies"].items():
+                time_rules = []
+                if "time_rules" in policy_data:
+                    for rule_data in policy_data["time_rules"]:
+                        time_rules.append(
+                            TimeRule(
+                                start=rule_data.get("start", "00:00"),
+                                end=rule_data.get("end", "23:59"),
+                                days=rule_data.get("days", []),
+                                allowed_categories=rule_data.get("allowed_categories"),
+                            )
+                        )
+
+                severity_str = policy_data.get("alert_severity", "medium")
+                try:
+                    severity = Severity(severity_str)
+                except ValueError:
+                    severity = Severity.MEDIUM
+
+                config.parental_policies[policy_name] = ParentalPolicy(
+                    name=policy_name,
+                    description=policy_data.get("description", ""),
+                    blocked_categories=policy_data.get("blocked_categories", []),
+                    allowed_domains=policy_data.get("allowed_domains", []),
+                    time_rules=time_rules,
+                    alert_severity=severity,
+                )
+
+        # Parse devices
+        if "devices" in pc:
+            for device_data in pc["devices"]:
+                config.parental_devices.append(
+                    Device(
+                        name=device_data.get("name", "unknown"),
+                        client_ips=device_data.get("client_ips", []),
+                        policy_name=device_data.get("policy", ""),
+                    )
+                )
+
+    # Device Activity Anomaly Detection section
+    if "device_activity" in data:
+        da = data["device_activity"]
+        if "enabled" in da:
+            config.device_activity_enabled = da["enabled"]
+        if "learning_days" in da:
+            config.device_activity_learning_days = da["learning_days"]
+        if "activity_threshold" in da:
+            config.device_activity_threshold = da["activity_threshold"]
+        if "min_samples" in da:
+            config.device_activity_min_samples = da["min_samples"]
+        if "alert_severity" in da:
+            config.device_activity_severity = da["alert_severity"]
+
+        # Parse named devices
+        if "devices" in da:
+            for device_data in da["devices"]:
+                config.device_activity_devices.append({
+                    "name": device_data.get("name", "unknown"),
+                    "client_ips": device_data.get("client_ips", []),
+                    "always_active": device_data.get("always_active", False),
+                })
 
     return config
 
