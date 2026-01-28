@@ -45,8 +45,8 @@ class AnalyzerConfig:
 
     # LLM classification settings (uses Ollama, two-tier)
     llm_enabled: bool = False
-    llm_triage_model: str = "gemma3:27b"
-    llm_escalation_model: str = "llama3.3:70b"
+    llm_triage_model: str = "gpt-oss:20b"
+    llm_escalation_model: str = "gpt-oss:20b"
     llm_classify_new_domains: bool = True  # Classify new domains with LLM
     llm_classify_alerts: bool = True  # Enrich alerts with LLM analysis
 

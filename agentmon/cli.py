@@ -282,8 +282,8 @@ def baseline(ctx: click.Context) -> None:
 @click.option("--learning", is_flag=True, default=None, help="Learning mode: build baseline without alerting")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output (show each message)")
 @click.option("--llm", is_flag=True, default=None, help="Enable LLM classification via Ollama")
-@click.option("--llm-triage", type=str, default=None, help="Fast triage model (default: gemma3:27b)")
-@click.option("--llm-escalation", type=str, default=None, help="Thorough escalation model (default: llama3.3:70b)")
+@click.option("--llm-triage", type=str, default=None, help="Fast triage model (default: gpt-oss:20b)")
+@click.option("--llm-escalation", type=str, default=None, help="Thorough escalation model (default: gpt-oss:20b)")
 @click.pass_context
 def listen(
     ctx: click.Context,

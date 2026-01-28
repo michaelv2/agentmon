@@ -60,8 +60,8 @@ class Config:
 
     # LLM (two-tier)
     llm_enabled: bool = False
-    llm_triage_model: str = "gemma3:27b"
-    llm_escalation_model: str = "llama3.3:70b"
+    llm_triage_model: str = "gpt-oss:20b"
+    llm_escalation_model: str = "gpt-oss:20b"
 
     # Alerting
     min_severity: str = "low"

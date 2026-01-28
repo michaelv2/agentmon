@@ -42,8 +42,8 @@ class ClassificationResult:
 class LLMConfig:
     """Configuration for LLM classifier."""
     # Two-tier model config
-    triage_model: str = "gemma3:27b"
-    escalation_model: str = "llama3.3:70b"
+    triage_model: str = "gpt-oss:20b"
+    escalation_model: str = "gpt-oss:20b"
 
     # Escalation triggers
     escalation_categories: list[str] = field(default_factory=lambda: [

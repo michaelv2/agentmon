@@ -122,8 +122,8 @@ enabled = false
 
 # Two-tier classification: fast triage, thorough escalation
 # Triage model runs on every alert; escalation only for suspicious results
-triage_model = "gemma3:27b"
-escalation_model = "llama3.3:70b"
+triage_model = "gpt-oss:20b"
+escalation_model = "gpt-oss:20b"
 
 # Escalate when triage returns these categories
 escalation_categories = ["suspicious", "likely_malicious", "dga", "unknown"]
