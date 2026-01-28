@@ -3,6 +3,7 @@
 Builds a baseline of normal DNS behavior per client and flags anomalies.
 """
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -11,6 +12,8 @@ from typing import Optional
 from agentmon.models import DNSEvent, Alert, Severity
 from agentmon.storage.db import EventStore
 from agentmon.analyzers.entropy import looks_like_dga, is_high_entropy_domain
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +43,12 @@ class AnalyzerConfig:
         ".arpa",  # Reverse DNS
     ])
 
+    # LLM classification settings
+    llm_endpoint: Optional[str] = None  # e.g., "http://localhost:8080/v1"
+    llm_model: str = "llama3.3"
+    llm_classify_new_domains: bool = True  # Classify new domains with LLM
+    llm_classify_alerts: bool = True  # Enrich alerts with LLM analysis
+
 
 class DNSBaselineAnalyzer:
     """Analyzes DNS events against a learned baseline."""
@@ -47,6 +56,57 @@ class DNSBaselineAnalyzer:
     def __init__(self, store: EventStore, config: Optional[AnalyzerConfig] = None) -> None:
         self.store = store
         self.config = config or AnalyzerConfig()
+        self._classifier = None
+        self._classifier_available = False
+
+        # Initialize LLM classifier if endpoint is configured
+        if self.config.llm_endpoint:
+            self._init_classifier()
+
+    def _init_classifier(self) -> None:
+        """Initialize the LLM classifier."""
+        try:
+            from agentmon.llm.classifier import DomainClassifier, LLMConfig
+
+            llm_config = LLMConfig(
+                local_endpoint=self.config.llm_endpoint,
+                local_model=self.config.llm_model,
+            )
+            self._classifier = DomainClassifier(llm_config)
+            self._classifier_available = True
+            logger.info(f"LLM classifier initialized: {self.config.llm_endpoint}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize LLM classifier: {e}")
+            self._classifier_available = False
+
+    def _classify_domain(self, event: DNSEvent) -> Optional[str]:
+        """Classify a domain using the LLM.
+
+        Returns the classification as a string, or None if unavailable.
+        """
+        if not self._classifier_available or not self._classifier:
+            return None
+
+        try:
+            result = self._classifier.classify(
+                domain=event.domain,
+                client=event.client,
+                query_type=event.query_type,
+                blocked=event.blocked,
+            )
+            return f"{result.category.value} (confidence: {result.confidence:.2f}): {result.reasoning}"
+        except Exception as e:
+            logger.debug(f"LLM classification failed for {event.domain}: {e}")
+            return None
+
+    def _enrich_alert_with_llm(self, alert: Alert, event: DNSEvent) -> None:
+        """Enrich an alert with LLM classification if available."""
+        if not self.config.llm_classify_alerts or alert.llm_analysis:
+            return
+
+        llm_analysis = self._classify_domain(event)
+        if llm_analysis:
+            alert.llm_analysis = llm_analysis
 
     def analyze_event(self, event: DNSEvent) -> list[Alert]:
         """Analyze a single DNS event and return any alerts.
@@ -74,17 +134,20 @@ class DNSBaselineAnalyzer:
         # Check 1: Known-bad patterns
         bad_alert = self._check_known_bad(event, domain_lower)
         if bad_alert:
+            self._enrich_alert_with_llm(bad_alert, event)
             alerts.append(bad_alert)
 
         # Check 2: DGA detection
         dga_alert = self._check_dga(event, domain_lower)
         if dga_alert:
+            self._enrich_alert_with_llm(dga_alert, event)
             alerts.append(dga_alert)
 
         # Check 3: New domain (not in baseline)
         if not self.config.learning_mode:
             new_domain_alert = self._check_new_domain(event, domain_lower)
             if new_domain_alert:
+                # LLM analysis already added in _check_new_domain
                 alerts.append(new_domain_alert)
 
         # Always update baseline (after checks, so we can detect "new")
@@ -184,13 +247,31 @@ class DNSBaselineAnalyzer:
     def _check_new_domain(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
         """Check if this is a never-before-seen domain for this client."""
         if not self.store.is_domain_known(event.client, domain_lower):
-            # This is a new domain - could be suspicious
-            # We generate a low-severity alert that can be reviewed
-            # In practice, you'd want more context (time of day, query volume, etc.)
+            # This is a new domain - classify with LLM if available
+            llm_analysis = None
+            severity = Severity.INFO
+            confidence = 0.3
+
+            if self.config.llm_classify_new_domains and self._classifier_available:
+                llm_analysis = self._classify_domain(event)
+
+                # Adjust severity based on LLM classification
+                if llm_analysis:
+                    analysis_lower = llm_analysis.lower()
+                    if "likely_malicious" in analysis_lower or "dga" in analysis_lower:
+                        severity = Severity.HIGH
+                        confidence = 0.8
+                    elif "suspicious" in analysis_lower:
+                        severity = Severity.MEDIUM
+                        confidence = 0.6
+                    elif "tracking" in analysis_lower or "advertising" in analysis_lower:
+                        severity = Severity.LOW
+                        confidence = 0.5
+
             return Alert(
                 id=str(uuid.uuid4()),
                 timestamp=event.timestamp,
-                severity=Severity.INFO,
+                severity=severity,
                 title="New domain observed",
                 description=(
                     f"Client {event.client} queried new domain '{event.domain}' "
@@ -200,7 +281,8 @@ class DNSBaselineAnalyzer:
                 client=event.client,
                 domain=event.domain,
                 analyzer="dns_baseline.new_domain",
-                confidence=0.3,
+                confidence=confidence,
+                llm_analysis=llm_analysis,
                 tags=["new", "baseline"],
             )
 
