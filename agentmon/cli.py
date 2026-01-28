@@ -14,18 +14,21 @@ from agentmon.analyzers import DNSBaselineAnalyzer
 from agentmon.analyzers.dns_baseline import AnalyzerConfig
 from agentmon.collectors import PiholeCollector
 from agentmon.collectors.pihole import PiholeConfig
+from agentmon.config import load_config, find_config_file
 from agentmon.models import Severity
 from agentmon.storage import EventStore
 
 console = Console()
 
 
-def get_default_db_path() -> Path:
-    """Get the default database path."""
-    return Path.home() / ".local" / "share" / "agentmon" / "events.db"
-
-
 @click.group()
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to config file (default: searches standard locations)",
+)
 @click.option(
     "--db",
     type=click.Path(path_type=Path),
@@ -33,17 +36,27 @@ def get_default_db_path() -> Path:
     help="Path to the DuckDB database file",
 )
 @click.pass_context
-def main(ctx: click.Context, db: Path | None) -> None:
+def main(ctx: click.Context, config: Path | None, db: Path | None) -> None:
     """agentmon - Network agent activity monitor and auditor."""
     ctx.ensure_object(dict)
 
-    if db is None:
-        db = get_default_db_path()
+    # Load config file
+    cfg = load_config(config)
+    ctx.obj["config"] = cfg
+
+    # CLI --db overrides config file
+    if db is not None:
+        cfg.db_path = db
 
     # Ensure parent directory exists
-    db.parent.mkdir(parents=True, exist_ok=True)
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ctx.obj["db_path"] = db
+    ctx.obj["db_path"] = cfg.db_path
+
+    # Show config file location if found
+    config_path = config or find_config_file()
+    if config_path:
+        ctx.obj["config_path"] = config_path
 
 
 @main.command()
@@ -257,36 +270,36 @@ def baseline(ctx: click.Context) -> None:
 
 
 @main.command()
-@click.option("--port", type=int, default=1514, help="Port to listen on (default: 1514)")
+@click.option("--port", type=int, default=None, help="Port to listen on (default: 1514)")
 @click.option(
     "--protocol",
     type=click.Choice(["udp", "tcp", "both"]),
-    default="tcp",
+    default=None,
     help="Protocol to use (default: tcp)",
 )
-@click.option("--bind", type=str, default="0.0.0.0", help="Address to bind to (default: 0.0.0.0)")
+@click.option("--bind", type=str, default=None, help="Address to bind to (default: 0.0.0.0)")
 @click.option("--allow", type=str, multiple=True, help="Allowed source IPs (can specify multiple)")
-@click.option("--learning", is_flag=True, help="Learning mode: build baseline without alerting")
+@click.option("--learning", is_flag=True, default=None, help="Learning mode: build baseline without alerting")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output (show each message)")
-@click.option("--llm", is_flag=True, help="Enable LLM classification via Ollama")
+@click.option("--llm", is_flag=True, default=None, help="Enable LLM classification via Ollama")
 @click.option(
     "--llm-model",
     type=str,
-    default="llama3.3:70b",
+    default=None,
     envvar="AGENTMON_LLM_MODEL",
     help="Ollama model name (default: llama3.3:70b)",
 )
 @click.pass_context
 def listen(
     ctx: click.Context,
-    port: int,
-    protocol: str,
-    bind: str,
+    port: int | None,
+    protocol: str | None,
+    bind: str | None,
     allow: tuple[str, ...],
-    learning: bool,
+    learning: bool | None,
     verbose: bool,
-    llm: bool,
-    llm_model: str,
+    llm: bool | None,
+    llm_model: str | None,
 ) -> None:
     """Listen for syslog messages from edge devices.
 
@@ -307,13 +320,24 @@ def listen(
     from agentmon.collectors.syslog_parsers import route_message
     from agentmon.collectors.syslog_receiver import SyslogConfig, SyslogMessage, SyslogReceiver
 
+    cfg = ctx.obj["config"]
     db_path: Path = ctx.obj["db_path"]
 
-    config = SyslogConfig(
-        port=port,
-        protocol=protocol,
-        bind_address=bind,
-        allowed_ips=list(allow),
+    # Use config file values, CLI overrides
+    syslog_port = port if port is not None else cfg.syslog_port
+    syslog_protocol = protocol if protocol is not None else cfg.syslog_protocol
+    syslog_bind = bind if bind is not None else cfg.syslog_bind_address
+    syslog_allowed = list(allow) if allow else cfg.syslog_allowed_ips
+
+    use_learning = learning if learning is not None else cfg.learning_mode
+    use_llm = llm if llm is not None else cfg.llm_enabled
+    use_llm_model = llm_model if llm_model is not None else cfg.llm_model
+
+    syslog_config = SyslogConfig(
+        port=syslog_port,
+        protocol=syslog_protocol,
+        bind_address=syslog_bind,
+        allowed_ips=syslog_allowed,
     )
 
     # Set up logging
@@ -323,6 +347,12 @@ def listen(
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # Show config source
+    if "config_path" in ctx.obj:
+        console.print(f"[dim]Config: {ctx.obj['config_path']}[/dim]")
+    if cfg.known_bad_patterns:
+        console.print(f"[dim]Loaded {len(cfg.known_bad_patterns)} known-bad patterns[/dim]")
 
     # Counters for stats
     stats = {
@@ -336,9 +366,14 @@ def listen(
     store.connect()
 
     analyzer_config = AnalyzerConfig(
-        learning_mode=learning,
-        llm_enabled=llm,
-        llm_model=llm_model,
+        learning_mode=use_learning,
+        llm_enabled=use_llm,
+        llm_model=use_llm_model,
+        known_bad_patterns=cfg.known_bad_patterns,
+        allowlist=cfg.allowlist,
+        ignore_suffixes=cfg.ignore_suffixes,
+        entropy_threshold=cfg.entropy_threshold,
+        entropy_min_length=cfg.entropy_min_length,
     )
     analyzer = DNSBaselineAnalyzer(store, analyzer_config)
 
@@ -407,15 +442,15 @@ def listen(
 
     async def run() -> None:
         """Run the syslog receiver."""
-        receiver = SyslogReceiver(config, handle_message)
+        receiver = SyslogReceiver(syslog_config, handle_message)
 
-        console.print(f"[green]Starting syslog receiver on {bind}:{port} ({protocol})[/green]")
-        if learning:
+        console.print(f"[green]Starting syslog receiver on {syslog_bind}:{syslog_port} ({syslog_protocol})[/green]")
+        if use_learning:
             console.print("[cyan]Learning mode: building baseline only[/cyan]")
-        if llm:
-            console.print(f"[cyan]LLM classification: Ollama ({llm_model})[/cyan]")
-        if allow:
-            console.print(f"[cyan]Allowed IPs: {', '.join(allow)}[/cyan]")
+        if use_llm:
+            console.print(f"[cyan]LLM classification: Ollama ({use_llm_model})[/cyan]")
+        if syslog_allowed:
+            console.print(f"[cyan]Allowed IPs: {', '.join(syslog_allowed)}[/cyan]")
         console.print("[dim]Press Ctrl+C to stop[/dim]")
         console.print()
 
