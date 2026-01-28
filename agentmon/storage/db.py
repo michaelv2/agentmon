@@ -257,18 +257,19 @@ class EventStore:
         Returns:
             True if a query was updated, False otherwise
         """
-        result = self.conn.execute("""
+        # Note: DuckDB doesn't support parameterized INTERVAL, so we use f-string
+        result = self.conn.execute(f"""
             UPDATE dns_events
             SET blocked = TRUE
             WHERE id = (
                 SELECT id FROM dns_events
                 WHERE domain = ?
                   AND blocked = FALSE
-                  AND timestamp > CURRENT_TIMESTAMP - INTERVAL ? SECOND
+                  AND timestamp > CURRENT_TIMESTAMP - INTERVAL {int(max_age_seconds)} SECOND
                 ORDER BY timestamp DESC
                 LIMIT 1
             )
-        """, [domain, max_age_seconds])
+        """, [domain])
         return result.rowcount > 0
 
     def insert_dns_events_batch(self, events: list[DNSEvent]) -> int:
