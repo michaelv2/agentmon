@@ -274,3 +274,48 @@ always_active = true
 name = "nas"
 client_ips = ["192.168.1.101"]
 always_active = true
+
+# =============================================================================
+# CLIENT IDENTITY RESOLUTION
+# =============================================================================
+# Resolves client IPs to hostnames so baselines survive DHCP changes.
+# Uses reverse DNS (PTR) lookup with caching and explicit mappings.
+#
+# Without this, when DHCP reassigns IPs:
+#   - alice-laptop's learned domains are now attributed to bob-phone
+#   - bob-phone triggers false "new domain" alerts
+#   - Detection quality degrades over time
+#
+# With this enabled, clients are tracked by hostname instead of IP.
+
+[client_resolver]
+enabled = false
+
+# DNS server for reverse lookups (usually Pi-hole or local router)
+# Leave unset to use system default resolver (/etc/resolv.conf)
+# dns_server = "192.168.1.1"
+
+# Cache TTL for resolved hostnames (seconds)
+# Higher values reduce DNS load but delay seeing hostname changes
+cache_ttl = 3600  # 1 hour
+
+# Strip domain suffix from hostnames
+# "alice-laptop.lan" → "alice-laptop"
+# "server.home.local" → "server"
+strip_suffix = true
+
+# Explicit IP → hostname mappings (highest priority)
+# Use for devices that don't register hostnames via DHCP
+# These override DNS lookups
+
+[[client_resolver.mappings]]
+ip = "192.168.1.100"
+name = "media-server"
+
+[[client_resolver.mappings]]
+ip = "192.168.1.101"
+name = "nas"
+
+# [[client_resolver.mappings]]
+# ip = "192.168.1.200"
+# name = "iot-hub"

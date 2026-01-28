@@ -90,6 +90,13 @@ class Config:
     device_activity_severity: str = "medium"
     device_activity_devices: list[dict] = field(default_factory=list)
 
+    # Client Identity Resolution
+    resolver_enabled: bool = False
+    resolver_dns_server: Optional[str] = None
+    resolver_cache_ttl: int = 3600  # 1 hour
+    resolver_strip_suffix: bool = True
+    resolver_mappings: dict[str, str] = field(default_factory=dict)
+
 
 def load_config(config_path: Optional[Path] = None) -> Config:
     """Load configuration from TOML file.
@@ -258,6 +265,26 @@ def load_config(config_path: Optional[Path] = None) -> Config:
                     "client_ips": device_data.get("client_ips", []),
                     "always_active": device_data.get("always_active", False),
                 })
+
+    # Client Identity Resolution section
+    if "client_resolver" in data:
+        cr = data["client_resolver"]
+        if "enabled" in cr:
+            config.resolver_enabled = cr["enabled"]
+        if "dns_server" in cr:
+            config.resolver_dns_server = cr["dns_server"]
+        if "cache_ttl" in cr:
+            config.resolver_cache_ttl = cr["cache_ttl"]
+        if "strip_suffix" in cr:
+            config.resolver_strip_suffix = cr["strip_suffix"]
+
+        # Parse explicit IP -> hostname mappings
+        if "mappings" in cr:
+            for mapping in cr["mappings"]:
+                ip = mapping.get("ip")
+                name = mapping.get("name")
+                if ip and name:
+                    config.resolver_mappings[ip] = name
 
     return config
 

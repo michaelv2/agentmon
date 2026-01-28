@@ -410,6 +410,20 @@ def listen(
         )
         device_activity_analyzer = DeviceActivityAnalyzer(store, activity_config)
 
+    # Initialize client resolver if configured
+    client_resolver = None
+    if cfg.resolver_enabled:
+        from agentmon.resolver import ClientResolver, ResolverConfig
+
+        resolver_config = ResolverConfig(
+            enabled=True,
+            dns_server=cfg.resolver_dns_server,
+            cache_ttl=cfg.resolver_cache_ttl,
+            strip_suffix=cfg.resolver_strip_suffix,
+            mappings=cfg.resolver_mappings,
+        )
+        client_resolver = ClientResolver(resolver_config)
+
     def handle_message(msg: SyslogMessage) -> None:
         """Process a received syslog message."""
         stats["messages_received"] += 1
@@ -432,6 +446,23 @@ def listen(
                 if updated and verbose:
                     console.print(f"[yellow]  -> blocked: {dns_event.domain}[/yellow]")
                 return
+
+            # Resolve client IP to hostname (if resolver is enabled)
+            # This allows baselines to survive DHCP changes
+            if client_resolver:
+                original_client = dns_event.client
+                resolved_client = client_resolver.resolve(dns_event.client)
+                if resolved_client != original_client:
+                    # Create new event with resolved client (DNSEvent is frozen)
+                    dns_event = type(dns_event)(
+                        timestamp=dns_event.timestamp,
+                        client=resolved_client,
+                        domain=dns_event.domain,
+                        query_type=dns_event.query_type,
+                        blocked=dns_event.blocked,
+                    )
+                    if verbose:
+                        console.print(f"[dim]  Resolved: {original_client} → {resolved_client}[/dim]")
 
             stats["dns_events"] += 1
             store.insert_dns_event(dns_event)
@@ -511,6 +542,13 @@ def listen(
                 f"[cyan]Device activity: learning={cfg.device_activity_learning_days}d, "
                 f"threshold={cfg.device_activity_threshold}q/h, "
                 f"{device_count} named devices[/cyan]"
+            )
+        if client_resolver:
+            mapping_count = len(cfg.resolver_mappings)
+            console.print(
+                f"[cyan]Client resolver: cache_ttl={cfg.resolver_cache_ttl}s, "
+                f"strip_suffix={cfg.resolver_strip_suffix}, "
+                f"{mapping_count} explicit mappings[/cyan]"
             )
         console.print("[dim]Press Ctrl+C to stop[/dim]")
         console.print()
