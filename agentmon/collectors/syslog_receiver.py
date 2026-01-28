@@ -334,10 +334,23 @@ class SyslogReceiver:
             logger.info("Shutdown signal received")
             stop_event.set()
 
+        # Register signal handlers
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, signal_handler)
+            try:
+                loop.add_signal_handler(sig, signal_handler)
+            except NotImplementedError:
+                # Signal handlers not supported on this platform (e.g., Windows)
+                pass
 
         try:
             await stop_event.wait()
+        except asyncio.CancelledError:
+            pass
         finally:
+            # Remove signal handlers before stopping
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.remove_signal_handler(sig)
+                except (NotImplementedError, ValueError):
+                    pass
             await self.stop()

@@ -380,6 +380,15 @@ def listen(
                     f"{conn_event.dst_ip}:{conn_event.dst_port} ({conn_event.protocol})"
                 )
 
+    def print_stats() -> None:
+        """Print final statistics."""
+        console.print()
+        console.print("[green]Syslog receiver stopped[/green]")
+        console.print(f"  Messages received: {stats['messages_received']:,}")
+        console.print(f"  DNS events: {stats['dns_events']:,}")
+        console.print(f"  Connection events: {stats['connection_events']:,}")
+        console.print(f"  Alerts generated: {stats['alerts']:,}")
+
     async def run() -> None:
         """Run the syslog receiver."""
         receiver = SyslogReceiver(config, handle_message)
@@ -394,19 +403,18 @@ def listen(
 
         try:
             await receiver.run_forever()
+        except asyncio.CancelledError:
+            pass
         finally:
             store.close()
-            console.print()
-            console.print("[green]Syslog receiver stopped[/green]")
-            console.print(f"  Messages received: {stats['messages_received']:,}")
-            console.print(f"  DNS events: {stats['dns_events']:,}")
-            console.print(f"  Connection events: {stats['connection_events']:,}")
-            console.print(f"  Alerts generated: {stats['alerts']:,}")
+            print_stats()
 
-    import contextlib
-
-    with contextlib.suppress(KeyboardInterrupt):
+    try:
         asyncio.run(run())
+    except KeyboardInterrupt:
+        # Print stats if we didn't get to the finally block
+        store.close()
+        print_stats()
 
 
 if __name__ == "__main__":
