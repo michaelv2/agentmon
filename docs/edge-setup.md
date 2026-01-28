@@ -44,9 +44,66 @@ agentmon listen -v
 ## Pi-hole Configuration
 
 Pi-hole logs DNS queries to its own log file (`/var/log/pihole/pihole.log`) rather than syslog.
-We use rsyslog's `imfile` module to tail this file and forward new entries to agentmon.
+The recommended approach is to use a simple systemd service that tails the log and forwards via logger.
 
-### Using rsyslog (imfile)
+### Recommended: systemd Service (tail + logger)
+
+This method is more reliable than rsyslog's imfile module, which can have buffering issues with pihole-FTL.
+
+Create the service file:
+
+```bash
+sudo nano /etc/systemd/system/agentmon-forward.service
+```
+
+Add the following (replace `<hub-ip>` with your agentmon hub's IP):
+
+```ini
+[Unit]
+Description=Forward Pi-hole logs to agentmon
+After=network.target pihole-FTL.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'tail -F /var/log/pihole/pihole.log | logger -t pihole -n <hub-ip> -P 1514 --tcp'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable agentmon-forward
+sudo systemctl start agentmon-forward
+
+# Check status
+sudo systemctl status agentmon-forward
+```
+
+**To find your Pi-hole log location:**
+```bash
+ls -la /var/log/pihole*/pihole.log /var/log/pihole.log 2>/dev/null
+```
+
+### Verify
+
+Check that logs are being forwarded:
+
+```bash
+# On Pi-hole - generate a DNS query
+nslookup example.com localhost
+
+# On agentmon hub - should see the query
+agentmon listen -v
+```
+
+### Alternative: rsyslog (imfile)
+
+**Note:** rsyslog's imfile module may have buffering issues with pihole-FTL's log writes. The systemd service above is more reliable. Use this only if you prefer rsyslog-based configuration.
 
 Create a new rsyslog configuration file:
 
@@ -69,43 +126,15 @@ input(type="imfile"
       freshStartTail="on")
 
 # Forward to agentmon via TCP
-if $syslogtag == 'pihole' then @@<hub-ip>:1514
+if $syslogtag startswith 'pihole' then @@<hub-ip>:1514
 ```
 
-**Note:** `freshStartTail="on"` ensures rsyslog only forwards new log entries, not the entire history.
-
-If your Pi-hole log is at a different location (e.g., `/var/log/pihole.log`), adjust the `File=` path accordingly.
+**Note:** `freshStartTail="on"` ensures rsyslog only forwards new log entries, not the entire history. Use `startswith` for the tag match since imfile appends a colon to tags.
 
 Restart rsyslog:
 
 ```bash
 sudo systemctl restart rsyslog
-```
-
-### Verify
-
-Check that logs are being forwarded:
-
-```bash
-# On Pi-hole - generate a DNS query
-nslookup example.com localhost
-
-# On agentmon hub - should see the query
-agentmon listen -v
-```
-
-### Troubleshooting Pi-hole
-
-**If you see a flood of old messages:** rsyslog is replaying history. Fix by clearing state:
-```bash
-sudo systemctl stop rsyslog
-sudo rm -f /var/spool/rsyslog/imfile-state:*
-sudo systemctl start rsyslog
-```
-
-**To find your Pi-hole log location:**
-```bash
-ls -la /var/log/pihole*/pihole.log /var/log/pihole.log 2>/dev/null
 ```
 
 ### Alternative: syslog-ng
@@ -299,7 +328,11 @@ ssh -N -L 1514:localhost:1514 user@<hub-ip>
 
 5. Verify edge device configuration:
    ```bash
-   # On Pi-hole
+   # On Pi-hole (systemd service)
+   sudo systemctl status agentmon-forward
+   journalctl -u agentmon-forward -f
+
+   # On Pi-hole (rsyslog alternative)
    cat /etc/rsyslog.d/99-agentmon.conf
    sudo rsyslogd -N1  # Check for config errors
 
@@ -309,26 +342,26 @@ ssh -N -L 1514:localhost:1514 user@<hub-ip>
 
 ### Pi-hole: Manual Test Works but DNS Queries Don't
 
-This usually means rsyslog isn't tailing the Pi-hole log correctly.
+If using the systemd service (recommended):
 
-1. Verify the log file path:
+1. Check the service is running:
+   ```bash
+   sudo systemctl status agentmon-forward
+   ```
+
+2. Check the log file path exists and is readable:
    ```bash
    ls -la /var/log/pihole*/pihole.log /var/log/pihole.log 2>/dev/null
    ```
 
-2. Check rsyslog state files:
+3. Restart the service:
    ```bash
-   ls -la /var/spool/rsyslog/
+   sudo systemctl restart agentmon-forward
    ```
 
-3. Reset rsyslog state:
-   ```bash
-   sudo systemctl stop rsyslog
-   sudo rm -f /var/spool/rsyslog/imfile-state:*
-   sudo systemctl start rsyslog
-   ```
+If using rsyslog (imfile), this usually means rsyslog isn't tailing the Pi-hole log correctly due to buffering issues with pihole-FTL. Consider switching to the systemd service method instead.
 
-### Flood of Old Messages
+### Flood of Old Messages (rsyslog only)
 
 rsyslog is replaying historical log entries. This happens when `freshStartTail="on"` is missing or rsyslog state was cleared while the log file has history.
 
@@ -341,6 +374,8 @@ sudo rm -f /var/spool/rsyslog/imfile-state:*
 sudo systemctl start rsyslog
 ```
 
+**Note:** The systemd service (tail + logger) method doesn't have this problem since `tail -F` only follows new lines by default.
+
 ### Messages Received but Not Parsed
 
 Run in verbose mode to see raw messages:
@@ -349,15 +384,21 @@ Run in verbose mode to see raw messages:
 agentmon listen -v
 ```
 
-Check that the message format matches expected patterns. Pi-hole log format:
+Check that the message format matches expected patterns. Pi-hole log format (in pihole.log):
 ```
-2024-01-27 12:00:00 query[A] example.com from 192.168.1.100
+Jan 28 01:14:11 dnsmasq[6587]: query[A] example.com from 192.168.1.100
+```
+
+When forwarded via tail | logger, it becomes:
+```
+<134>Jan 28 01:14:11 pi-hole pihole: Jan 28 01:14:11 dnsmasq[6587]: query[A] example.com from 192.168.1.100
 ```
 
 ### High CPU Usage
 
 If receiving high message volume:
-- Ensure `freshStartTail="on"` is set (prevents log replay)
+- If using rsyslog, ensure `freshStartTail="on"` is set (prevents log replay)
+- The systemd service method is lightweight and handles high volume well
 - Consider filtering at the source (only forward query lines)
 - For very high volume, batch processing may help (future feature)
 
@@ -369,11 +410,11 @@ If receiving high message volume:
 # Test TCP connectivity
 nc -zv <hub-ip> 1514
 
-# Send a simulated Pi-hole DNS query (TCP)
-echo "<30>Jan 27 14:32:15 pihole pihole: query[A] example.com from 192.168.1.100" | nc <hub-ip> 1514
+# Send a simulated Pi-hole DNS query (format from tail | logger)
+echo "<134>Jan 28 14:32:15 pi-hole pihole: Jan 28 14:32:15 dnsmasq[1234]: query[A] example.com from 192.168.1.100" | nc <hub-ip> 1514
 
-# Or with the dnsmasq tag format
-echo "<30>Jan 27 14:32:15 pihole dnsmasq[1234]: query[A] example.com from 192.168.1.100" | nc <hub-ip> 1514
+# Simpler format (also works)
+echo "<30>Jan 28 14:32:15 pihole pihole: dnsmasq[1234]: query[A] example.com from 192.168.1.100" | nc <hub-ip> 1514
 ```
 
 ### Verify on Hub

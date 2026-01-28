@@ -69,12 +69,23 @@ class PiholeParser:
     """Parser for Pi-hole/dnsmasq syslog messages."""
 
     # Tags that indicate dnsmasq messages (lowercase for comparison)
-    DNSMASQ_TAGS = {"dnsmasq", "dnsmasq-dhcp", "pihole-ftl"}
+    DNSMASQ_TAGS = {"dnsmasq", "dnsmasq-dhcp", "pihole-ftl", "pihole"}
 
     @classmethod
     def can_parse(cls, msg: SyslogMessage) -> bool:
         """Check if this parser can handle the message."""
-        return msg.tag.lower() in cls.DNSMASQ_TAGS or msg.tag.lower().startswith("dnsmasq")
+        tag_lower = msg.tag.lower()
+        return (
+            tag_lower in cls.DNSMASQ_TAGS
+            or tag_lower.startswith("dnsmasq")
+            or tag_lower.startswith("pihole")
+        )
+
+    # Pattern to extract dnsmasq content from embedded log lines
+    # Matches: "Jan 28 01:14:11 dnsmasq[6587]: query[A] ..." or just "query[A] ..."
+    EMBEDDED_DNSMASQ_PATTERN = re.compile(
+        r"(?:.*?dnsmasq\[\d+\]:\s*)?(query\[|forwarded|reply|gravity blocked|blacklisted|regex blocked|cached)"
+    )
 
     @classmethod
     def parse(cls, msg: SyslogMessage) -> DNSEvent | None:
@@ -87,6 +98,16 @@ class PiholeParser:
             DNSEvent if the message is a DNS query, None otherwise
         """
         content = msg.message.strip()
+
+        # Handle embedded dnsmasq format from tail | logger
+        # e.g., "Jan 28 01:14:11 dnsmasq[6587]: query[A] example.com from 192.168.1.100"
+        dnsmasq_marker = "dnsmasq["
+        if dnsmasq_marker in content:
+            # Find the colon after dnsmasq[pid] and extract the rest
+            marker_pos = content.find(dnsmasq_marker)
+            colon_pos = content.find(":", marker_pos)
+            if colon_pos != -1:
+                content = content[colon_pos + 1:].strip()
 
         # Query pattern
         match = DNSMASQ_QUERY_PATTERN.match(content)

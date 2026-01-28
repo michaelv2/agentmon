@@ -7,6 +7,8 @@ DuckDB is chosen for:
 - Single-file database (simple deployment)
 """
 
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -33,11 +35,32 @@ class EventStore:
         self.db_path = db_path
         self.read_only = read_only
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
+        self._temp_db_path: Optional[Path] = None
 
     def connect(self) -> None:
         """Open database connection and ensure schema exists."""
         db_str = str(self.db_path) if self.db_path != Path(":memory:") else ":memory:"
-        self._conn = duckdb.connect(db_str, read_only=self.read_only)
+
+        if self.read_only and self.db_path != Path(":memory:"):
+            # For read-only access, copy DB to temp file to avoid lock conflicts
+            # DuckDB doesn't support true concurrent read access with a writer
+            try:
+                self._conn = duckdb.connect(db_str, read_only=True)
+            except duckdb.IOException:
+                # Database is locked by writer, copy to temp file
+                # Must copy both .db and .wal files for complete data
+                import os
+                temp_dir = tempfile.mkdtemp(prefix="agentmon_")
+                self._temp_db_path = Path(temp_dir) / "events.db"
+                shutil.copy2(self.db_path, self._temp_db_path)
+                # Also copy WAL file if it exists
+                wal_path = Path(str(self.db_path) + ".wal")
+                if wal_path.exists():
+                    shutil.copy2(wal_path, Path(temp_dir) / "events.db.wal")
+                self._conn = duckdb.connect(str(self._temp_db_path), read_only=True)
+        else:
+            self._conn = duckdb.connect(db_str, read_only=self.read_only)
+
         if not self.read_only:
             self._ensure_schema()
 
@@ -46,6 +69,11 @@ class EventStore:
         if self._conn:
             self._conn.close()
             self._conn = None
+        # Clean up temp directory if we created one
+        if self._temp_db_path and self._temp_db_path.exists():
+            temp_dir = self._temp_db_path.parent
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self._temp_db_path = None
 
     def __enter__(self) -> "EventStore":
         self.connect()
