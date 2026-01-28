@@ -348,3 +348,20 @@ alerts_days = 90
 
 # Run cleanup at startup and then every N hours
 cleanup_interval_hours = 24
+
+# ==============================================================================
+# Threat Intelligence Feeds
+# ==============================================================================
+# Automatically download and check domains against external threat feeds
+# Sources: URLhaus (malware/C2), Feodo Tracker (botnets)
+[threat_feeds]
+enabled = false
+
+# Directory to cache downloaded feeds
+cache_dir = "~/.cache/agentmon/feeds"
+
+# How often to refresh feeds (hours)
+update_interval_hours = 24
+
+# Alert severity for threat feed matches
+alert_severity = "high"

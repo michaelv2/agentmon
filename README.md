@@ -13,6 +13,7 @@ The LLM integration allows for intelligent classification of domains based on th
 - **Baseline learning** - Builds per-client domain baseline, alerts on new/unusual domains
 - **DGA detection** - Flags algorithmically-generated domains using entropy analysis
 - **Known-bad patterns** - Matches against configurable threat indicators (C2, malware, mining pools)
+- **Threat intelligence feeds** - Automatic updates from URLhaus, Feodo Tracker (malware/C2/phishing)
 - **LLM classification** - Two-tier Ollama integration for intelligent domain analysis
 - **Device activity anomaly** - Learns normal activity hours per device, alerts on off-hours activity
 - **Parental controls** - Time-based content filtering with category blocking
@@ -151,6 +152,37 @@ export OLLAMA_HOST="your_ollama_host:11434"
 agentmon listen --llm
 ```
 
+### Threat intelligence feeds
+
+Automatically downloads and checks domains against external threat feeds from reputable sources (URLhaus, Feodo Tracker). Provides high-confidence alerts for known malware/C2/phishing domains.
+
+```toml
+[threat_feeds]
+enabled = true
+
+# Directory to cache downloaded feeds
+cache_dir = "~/.cache/agentmon/feeds"
+
+# How often to refresh feeds (hours)
+update_interval_hours = 24
+
+# Alert severity for threat feed matches
+alert_severity = "high"
+```
+
+Manual feed management:
+
+```bash
+# Update feeds and show statistics
+agentmon feeds
+
+# Feeds are automatically updated when stale during startup
+```
+
+**Feed sources:**
+- **URLhaus (abuse.ch)** - Malware distribution sites, C2 servers, phishing
+- **Feodo Tracker (abuse.ch)** - Banking trojan C2 servers (Dridex, TrickBot, Emotet)
+
 ### Client identity resolution
 
 Resolves client IPs to stable hostnames so baselines survive DHCP changes.
@@ -256,6 +288,7 @@ agentmon collect --host pihole.local --learning
 | `agentmon alerts` | Show unacknowledged security alerts |
 | `agentmon baseline` | Show learned baseline statistics |
 | `agentmon cleanup` | Clean up old data per retention policy |
+| `agentmon feeds` | Update and show threat intelligence feed status |
 
 ### Listen options
 

@@ -108,6 +108,12 @@ class Config:
     retention_alerts_days: int = 90
     retention_cleanup_interval_hours: int = 24
 
+    # Threat Intelligence Feeds
+    threat_feeds_enabled: bool = False
+    threat_feeds_cache_dir: Path = field(default_factory=lambda: Path.home() / ".cache" / "agentmon" / "feeds")
+    threat_feeds_update_interval_hours: int = 24
+    threat_feeds_severity: str = "high"
+
 
 def load_config(config_path: Optional[Path] = None) -> Config:
     """Load configuration from TOML file.
@@ -318,6 +324,18 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.retention_alerts_days = ret["alerts_days"]
         if "cleanup_interval_hours" in ret:
             config.retention_cleanup_interval_hours = ret["cleanup_interval_hours"]
+
+    # Threat Intelligence Feeds section
+    if "threat_feeds" in data:
+        tf = data["threat_feeds"]
+        if "enabled" in tf:
+            config.threat_feeds_enabled = tf["enabled"]
+        if "cache_dir" in tf:
+            config.threat_feeds_cache_dir = Path(tf["cache_dir"]).expanduser()
+        if "update_interval_hours" in tf:
+            config.threat_feeds_update_interval_hours = tf["update_interval_hours"]
+        if "alert_severity" in tf:
+            config.threat_feeds_severity = tf["alert_severity"]
 
     return config
 

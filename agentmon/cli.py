@@ -458,7 +458,18 @@ def listen(
         entropy_min_length=cfg.entropy_min_length,
         alert_dedup_window=cfg.alert_dedup_window,
     )
-    analyzer = DNSBaselineAnalyzer(store, analyzer_config)
+    # Initialize threat feed manager if configured
+    threat_feed_manager = None
+    if cfg.threat_feeds_enabled:
+        from agentmon.threat_feeds import ThreatFeedManager
+
+        threat_feed_manager = ThreatFeedManager(
+            cache_dir=cfg.threat_feeds_cache_dir,
+            update_interval_hours=cfg.threat_feeds_update_interval_hours,
+        )
+        console.print("[dim]Threat intelligence feeds enabled[/dim]")
+
+    analyzer = DNSBaselineAnalyzer(store, analyzer_config, threat_feed_manager)
 
     # Initialize Slack notifier if configured
     slack_notifier = None
@@ -718,6 +729,61 @@ def listen(
         # Print stats if we didn't get to the finally block
         store.close()
         print_stats()
+
+
+@cli.command()
+@click.pass_context
+def feeds(ctx: click.Context) -> None:
+    """Manage threat intelligence feeds.
+
+    Shows status of downloaded threat feeds and allows manual updates.
+    """
+    cfg = ctx.obj["config"]
+
+    if not cfg.threat_feeds_enabled:
+        console.print("[yellow]Threat feeds are disabled in config[/yellow]")
+        console.print("Enable with [cyan][threat_feeds] enabled = true[/cyan]")
+        return
+
+    from agentmon.threat_feeds import ThreatFeedManager
+
+    manager = ThreatFeedManager(
+        cache_dir=cfg.threat_feeds_cache_dir,
+        update_interval_hours=cfg.threat_feeds_update_interval_hours,
+    )
+
+    # Update feeds
+    console.print("[cyan]Updating threat intelligence feeds...[/cyan]")
+    manager.update_feeds()
+
+    # Show stats
+    stats = manager.get_stats()
+
+    console.print(f"\n[green]Total malicious domains: {stats['total_domains']:,}[/green]\n")
+
+    if stats["feeds"]:
+        from rich.table import Table
+
+        table = Table(title="Threat Feeds")
+        table.add_column("Feed", style="cyan")
+        table.add_column("Domains", justify="right", style="yellow")
+        table.add_column("Last Updated", style="dim")
+        table.add_column("Age (hours)", justify="right", style="dim")
+
+        for feed in stats["feeds"]:
+            age_style = "green" if feed["age_hours"] < 24 else "yellow" if feed["age_hours"] < 48 else "red"
+            table.add_row(
+                feed["name"],
+                f"{feed['domains']:,}",
+                feed["updated"],
+                f"[{age_style}]{feed['age_hours']}[/{age_style}]",
+            )
+
+        console.print(table)
+    else:
+        console.print("[yellow]No feeds cached yet[/yellow]")
+
+    console.print(f"\n[dim]Cache directory: {cfg.threat_feeds_cache_dir}[/dim]")
 
 
 if __name__ == "__main__":

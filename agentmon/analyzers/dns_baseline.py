@@ -69,11 +69,17 @@ class AnalyzerConfig:
 class DNSBaselineAnalyzer:
     """Analyzes DNS events against a learned baseline."""
 
-    def __init__(self, store: EventStore, config: Optional[AnalyzerConfig] = None) -> None:
+    def __init__(
+        self,
+        store: EventStore,
+        config: Optional[AnalyzerConfig] = None,
+        threat_feed_manager=None,
+    ) -> None:
         self.store = store
         self.config = config or AnalyzerConfig()
         self._classifier = None
         self._classifier_available = False
+        self._threat_feed_manager = threat_feed_manager
 
         # Alert deduplication cache: (domain, client, alert_type) -> True
         self._alert_cache: TTLCache[str, bool] = TTLCache(
@@ -235,6 +241,13 @@ class DNSBaselineAnalyzer:
             self.store.update_domain_baseline(event.client, domain_lower, event.timestamp)
             return []
 
+        # Check 0: Threat intelligence feeds (highest priority)
+        threat_alert = self._check_threat_feed(event, domain_lower)
+        if threat_alert:
+            if not self._is_duplicate_alert(domain_lower, event.client, "threat_feed"):
+                self._enrich_alert_with_llm(threat_alert, event)
+                alerts.append(threat_alert)
+
         # Check 1: Known-bad patterns
         bad_alert = self._check_known_bad(event, domain_lower)
         if bad_alert:
@@ -280,6 +293,31 @@ class DNSBaselineAnalyzer:
     def _should_ignore(self, domain: str) -> bool:
         """Check if domain should be ignored based on suffix."""
         return any(domain.endswith(suffix) for suffix in self.config.ignore_suffixes)
+
+    def _check_threat_feed(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
+        """Check if domain is in external threat intelligence feeds."""
+        if not self._threat_feed_manager:
+            return None
+
+        feed_match = self._threat_feed_manager.check_domain(domain_lower)
+        if feed_match:
+            return Alert(
+                id=str(uuid.uuid4()),
+                timestamp=event.timestamp,
+                severity=Severity.HIGH,
+                title="Domain in threat intelligence feed",
+                description=(
+                    f"Client {event.client} queried domain '{event.domain}' "
+                    f"which appears in threat intelligence feeds (malware/C2/phishing)"
+                ),
+                source_event_type="dns",
+                client=event.client,
+                domain=event.domain,
+                analyzer="dns_baseline.threat_feed",
+                confidence=0.90,
+                tags=["threat_feed", "external_intel"],
+            )
+        return None
 
     def _check_known_bad(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
         """Check if domain matches known-bad patterns."""
