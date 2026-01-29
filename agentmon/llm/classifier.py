@@ -100,7 +100,7 @@ def sanitize_domain_for_prompt(domain: str) -> str:
     return sanitized.lower()
 
 # Default cache settings
-DEFAULT_CACHE_TTL = 300  # 5 minutes
+DEFAULT_CACHE_TTL = 604800  # 1 week (7 days)
 DEFAULT_CACHE_SIZE = 1000
 
 
