@@ -469,7 +469,18 @@ def listen(
         )
         console.print("[dim]Threat intelligence feeds enabled[/dim]")
 
-    analyzer = DNSBaselineAnalyzer(store, analyzer_config, threat_feed_manager)
+    # Initialize VirusTotal client if API key is configured
+    vt_client = None
+    if cfg.virustotal_api_key:
+        from agentmon.threat_intel.virustotal import VirusTotalClient
+
+        vt_client = VirusTotalClient(
+            api_key=cfg.virustotal_api_key,
+            cache_ttl=cfg.virustotal_cache_ttl,
+        )
+        console.print("[dim]VirusTotal API enabled[/dim]")
+
+    analyzer = DNSBaselineAnalyzer(store, analyzer_config, threat_feed_manager, vt_client)
 
     # Initialize Slack notifier if configured
     slack_notifier = None

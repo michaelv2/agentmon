@@ -146,6 +146,21 @@ escalation_confidence_threshold = 0.7
 downgrade_enabled = true
 downgrade_confidence = 0.8  # Minimum confidence to trust downgrade
 
+# ==============================================================================
+# VirusTotal Integration
+# ==============================================================================
+# Real-time threat intelligence for domain reputation checking
+# Requires VirusTotal API key (free tier: 4 requests/min, 500/day)
+# Get API key at: https://www.virustotal.com/gui/my-apikey
+[virustotal]
+# API key - SECURITY: Use environment variable instead of config file:
+#   export AGENTMON_VIRUSTOTAL_API_KEY="your-api-key-here"
+# api_key = "YOUR_API_KEY_HERE"
+
+# Cache duration for VirusTotal lookups (seconds)
+# Default: 86400 (24 hours) - balance between freshness and rate limits
+cache_ttl = 86400
+
 [alerting]
 # Minimum severity to alert on
 min_severity = "low"  # info, low, medium, high, critical

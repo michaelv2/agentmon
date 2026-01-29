@@ -182,10 +182,12 @@ class DomainClassifier:
         config: Optional[LLMConfig] = None,
         cache_ttl: int = DEFAULT_CACHE_TTL,
         cache_size: int = DEFAULT_CACHE_SIZE,
+        vt_client=None,
     ) -> None:
         self.config = config or LLMConfig()
         self._client = None
         self._available = False
+        self._vt_client = vt_client
         self._cache: TTLCache[str, ClassificationResult] = TTLCache(
             maxsize=cache_size, ttl=cache_ttl
         )
@@ -318,12 +320,23 @@ class DomainClassifier:
         safe_client = sanitize_for_prompt(client or "unknown", "client", 45)  # IPv6 max
         safe_query_type = sanitize_for_prompt(query_type or "unknown", "query_type", 10)
 
+        # Fetch VirusTotal reputation if available
+        vt_context = ""
+        if self._vt_client:
+            vt_rep = self._vt_client.lookup(domain)
+            if vt_rep and vt_rep.total_vendors > 0:
+                vt_context = f"\nVirusTotal: {vt_rep.summary()}"
+
         prompt = CLASSIFICATION_PROMPT.format(
             domain=safe_domain,
             client=safe_client,
             query_type=safe_query_type,
             blocked="yes" if blocked else "no",
         )
+
+        # Append VirusTotal context if available
+        if vt_context:
+            prompt += vt_context
 
         try:
             response = self._client.chat(

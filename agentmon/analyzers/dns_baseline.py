@@ -74,12 +74,14 @@ class DNSBaselineAnalyzer:
         store: EventStore,
         config: Optional[AnalyzerConfig] = None,
         threat_feed_manager=None,
+        vt_client=None,
     ) -> None:
         self.store = store
         self.config = config or AnalyzerConfig()
         self._classifier = None
         self._classifier_available = False
         self._threat_feed_manager = threat_feed_manager
+        self._vt_client = vt_client
 
         # Alert deduplication cache: (domain, client, alert_type) -> True
         self._alert_cache: TTLCache[str, bool] = TTLCache(
@@ -101,7 +103,7 @@ class DNSBaselineAnalyzer:
                 triage_model=self.config.llm_triage_model,
                 escalation_model=self.config.llm_escalation_model,
             )
-            self._classifier = DomainClassifier(llm_config)
+            self._classifier = DomainClassifier(llm_config, vt_client=self._vt_client)
             self._classifier_available = self._classifier.available
             if self._classifier_available:
                 logger.info(

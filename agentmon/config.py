@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Environment variable names for sensitive settings
 ENV_SLACK_WEBHOOK = "AGENTMON_SLACK_WEBHOOK"
 ENV_OLLAMA_HOST = "OLLAMA_HOST"
+ENV_VIRUSTOTAL_API_KEY = "AGENTMON_VIRUSTOTAL_API_KEY"
 
 
 def get_default_config_path() -> Path:
@@ -73,6 +74,10 @@ class Config:
     llm_escalation_model: str = "gpt-oss:20b"
     llm_downgrade_enabled: bool = True
     llm_downgrade_confidence: float = 0.8
+
+    # VirusTotal
+    virustotal_api_key: Optional[str] = None
+    virustotal_cache_ttl: int = 86400  # 24 hours
 
     # Alerting
     min_severity: str = "low"
@@ -222,6 +227,12 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         if not config.slack_enabled:
             logger.info(f"Slack enabled via {ENV_SLACK_WEBHOOK} environment variable")
             config.slack_enabled = True
+
+    # AGENTMON_VIRUSTOTAL_API_KEY takes precedence over config file
+    env_vt_key = os.environ.get(ENV_VIRUSTOTAL_API_KEY)
+    if env_vt_key:
+        config.virustotal_api_key = env_vt_key
+        logger.info("VirusTotal API key loaded from environment variable")
 
     # Parental Controls section
     if "parental_controls" in data:

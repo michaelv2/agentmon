@@ -183,6 +183,38 @@ agentmon feeds
 - **URLhaus (abuse.ch)** - Malware distribution sites, C2 servers, phishing
 - **Feodo Tracker (abuse.ch)** - Banking trojan C2 servers (Dridex, TrickBot, Emotet)
 
+### VirusTotal reputation checking
+
+Real-time vendor detection counts from VirusTotal. When LLM classification encounters a domain, it queries VirusTotal for current reputation (malicious detections, vendor consensus). Provides the latest threat intelligence to inform model decisions.
+
+Get a free VirusTotal API key at: https://www.virustotal.com/gui/my-apikey
+
+```bash
+# Set API key via environment variable (recommended)
+export AGENTMON_VIRUSTOTAL_API_KEY="your-api-key-here"
+agentmon listen --port 1514 --llm
+```
+
+Or configure in `agentmon.toml`:
+
+```toml
+[virustotal]
+# API key - SECURITY: Prefer environment variable (AGENTMON_VIRUSTOTAL_API_KEY)
+# api_key = "YOUR_API_KEY_HERE"
+
+# Cache VirusTotal results for 24 hours
+cache_ttl = 86400
+```
+
+**How it works:**
+1. LLM triage model classifies domain as suspicious/unknown
+2. Before escalating to larger model, query VirusTotal
+3. Include vendor detection summary in prompt: "VirusTotal: 12 malicious, 5 suspicious (21 vendors)"
+4. Larger model uses this context for final decision
+5. Results cached for 24 hours to respect rate limits
+
+**Free tier limits:** 4 requests/min, 500/day - suitable for small to medium networks
+
 ### Client identity resolution
 
 Resolves client IPs to stable hostnames so baselines survive DHCP changes.
