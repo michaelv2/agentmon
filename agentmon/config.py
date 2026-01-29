@@ -77,7 +77,6 @@ class Config:
 
     # VirusTotal
     virustotal_api_key: Optional[str] = None
-    virustotal_cache_ttl: int = 86400  # 24 hours
 
     # Alerting
     min_severity: str = "low"
@@ -341,8 +340,6 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         vt = data["virustotal"]
         if "api_key" in vt:
             config.virustotal_api_key = vt["api_key"]
-        if "cache_ttl" in vt:
-            config.virustotal_cache_ttl = vt["cache_ttl"]
 
     # Threat Intelligence Feeds section
     if "threat_feeds" in data:

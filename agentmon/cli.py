@@ -474,10 +474,7 @@ def listen(
     if cfg.virustotal_api_key:
         from agentmon.threat_intel.virustotal import VirusTotalClient
 
-        vt_client = VirusTotalClient(
-            api_key=cfg.virustotal_api_key,
-            cache_ttl=cfg.virustotal_cache_ttl,
-        )
+        vt_client = VirusTotalClient(api_key=cfg.virustotal_api_key)
         console.print("[dim]VirusTotal API enabled[/dim]")
 
     analyzer = DNSBaselineAnalyzer(store, analyzer_config, threat_feed_manager, vt_client)

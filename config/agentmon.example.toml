@@ -149,17 +149,16 @@ downgrade_confidence = 0.8  # Minimum confidence to trust downgrade
 # ==============================================================================
 # VirusTotal Integration
 # ==============================================================================
-# Real-time threat intelligence for domain reputation checking
+# Real-time threat intelligence for domain reputation checking.
+# VT data is queried during LLM escalation and cached with the classification
+# result (24 hours). Failed lookups are negatively cached for 1 hour.
+#
 # Requires VirusTotal API key (free tier: 4 requests/min, 500/day)
 # Get API key at: https://www.virustotal.com/gui/my-apikey
 [virustotal]
 # API key - SECURITY: Use environment variable instead of config file:
 #   export AGENTMON_VIRUSTOTAL_API_KEY="your-api-key-here"
 # api_key = "YOUR_API_KEY_HERE"
-
-# Cache duration for VirusTotal lookups (seconds)
-# Default: 86400 (24 hours) - balance between freshness and rate limits
-cache_ttl = 86400
 
 [alerting]
 # Minimum severity to alert on

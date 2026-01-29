@@ -100,7 +100,9 @@ def sanitize_domain_for_prompt(domain: str) -> str:
     return sanitized.lower()
 
 # Default cache settings
-DEFAULT_CACHE_TTL = 604800  # 1 week (7 days)
+# 24 hours: aligns with VirusTotal data freshness so classifications
+# are re-evaluated daily with current threat intelligence
+DEFAULT_CACHE_TTL = 86400  # 24 hours
 DEFAULT_CACHE_SIZE = 1000
 
 
