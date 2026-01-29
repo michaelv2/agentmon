@@ -336,6 +336,14 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         if "cleanup_interval_hours" in ret:
             config.retention_cleanup_interval_hours = ret["cleanup_interval_hours"]
 
+    # VirusTotal section
+    if "virustotal" in data:
+        vt = data["virustotal"]
+        if "api_key" in vt:
+            config.virustotal_api_key = vt["api_key"]
+        if "cache_ttl" in vt:
+            config.virustotal_cache_ttl = vt["cache_ttl"]
+
     # Threat Intelligence Feeds section
     if "threat_feeds" in data:
         tf = data["threat_feeds"]

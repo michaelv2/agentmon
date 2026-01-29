@@ -5,7 +5,7 @@ Queries VirusTotal for real-time domain reputation and vendor detections.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -16,8 +16,14 @@ logger = logging.getLogger(__name__)
 # VirusTotal API endpoint
 VT_API_URL = "https://www.virustotal.com/api/v3/domains"
 
-# Default cache: 24 hours
+# Default cache: 24 hours for successful lookups
 DEFAULT_VT_CACHE_TTL = 86400
+
+# Negative cache: 1 hour for failed lookups (avoids hammering a failing API)
+NEGATIVE_CACHE_TTL = 3600
+
+# Sentinel value for negative cache entries
+_LOOKUP_FAILED = object()
 
 
 @dataclass
@@ -87,8 +93,10 @@ class VirusTotalClient:
         self.timeout = timeout
         self.available = api_key is not None
 
-        # Cache: domain -> VirusTotalReputation
+        # Cache: domain -> VirusTotalReputation (successful lookups)
         self._cache: TTLCache = TTLCache(maxsize=1000, ttl=cache_ttl)
+        # Negative cache: domain -> _LOOKUP_FAILED (short TTL to avoid hammering)
+        self._neg_cache: TTLCache = TTLCache(maxsize=500, ttl=NEGATIVE_CACHE_TTL)
 
         if self.api_key:
             logger.info("VirusTotal API enabled")
@@ -109,10 +117,15 @@ class VirusTotalClient:
 
         domain_lower = domain.lower()
 
-        # Check cache
+        # Check positive cache
         if domain_lower in self._cache:
             logger.debug(f"VirusTotal cache hit: {domain}")
             return self._cache[domain_lower]
+
+        # Check negative cache (recently failed lookups)
+        if domain_lower in self._neg_cache:
+            logger.debug(f"VirusTotal negative cache hit: {domain}")
+            return None
 
         # Query API
         try:
@@ -122,6 +135,7 @@ class VirusTotalClient:
             return reputation
         except Exception as e:
             logger.warning(f"VirusTotal lookup failed for {domain}: {e}")
+            self._neg_cache[domain_lower] = _LOOKUP_FAILED
             return None
 
     def _query_api(self, domain: str) -> Optional[VirusTotalReputation]:

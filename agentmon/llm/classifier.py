@@ -168,7 +168,7 @@ Domain: `{domain}`
 Client IP: `{client}`
 Query type: `{query_type}`
 Blocked by Pi-hole: {blocked}
-=== END REQUEST ===
+{vt_context}=== END REQUEST ===
 
 Respond with ONLY valid JSON (no markdown, no extra text):
 {{"category": "<category>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}}"""
@@ -286,7 +286,13 @@ class DomainClassifier:
             self._cache[domain] = triage_result
             return triage_result
 
-        # Step 3: Escalate
+        # Step 3: Escalate (with optional VirusTotal context)
+        vt_context = ""
+        if self._vt_client:
+            vt_rep = self._vt_client.lookup(domain)
+            if vt_rep and vt_rep.total_vendors > 0:
+                vt_context = f"VirusTotal: {vt_rep.summary()}\n"
+
         logger.info(
             f"Escalating {domain}: triage={triage_result.category.value} "
             f"(conf={triage_result.confidence:.2f})"
@@ -294,6 +300,7 @@ class DomainClassifier:
 
         escalation_result = self._query_model(
             self.config.escalation_model, domain, client, query_type, blocked,
+            vt_context=vt_context,
         )
 
         if escalation_result is None:
@@ -313,30 +320,26 @@ class DomainClassifier:
         client: str,
         query_type: str,
         blocked: bool,
+        vt_context: str = "",
     ) -> Optional[ClassificationResult]:
-        """Query a specific model for classification."""
+        """Query a specific model for classification.
+
+        Args:
+            vt_context: Optional VirusTotal context string to include in the prompt.
+                        Only passed during escalation to conserve VT API rate limits.
+        """
         # Sanitize all inputs to prevent prompt injection
         safe_domain = sanitize_domain_for_prompt(domain)
         safe_client = sanitize_for_prompt(client or "unknown", "client", 45)  # IPv6 max
         safe_query_type = sanitize_for_prompt(query_type or "unknown", "query_type", 10)
-
-        # Fetch VirusTotal reputation if available
-        vt_context = ""
-        if self._vt_client:
-            vt_rep = self._vt_client.lookup(domain)
-            if vt_rep and vt_rep.total_vendors > 0:
-                vt_context = f"\nVirusTotal: {vt_rep.summary()}"
 
         prompt = CLASSIFICATION_PROMPT.format(
             domain=safe_domain,
             client=safe_client,
             query_type=safe_query_type,
             blocked="yes" if blocked else "no",
+            vt_context=vt_context,
         )
-
-        # Append VirusTotal context if available
-        if vt_context:
-            prompt += vt_context
 
         try:
             response = self._client.chat(
