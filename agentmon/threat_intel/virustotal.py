@@ -145,54 +145,53 @@ class VirusTotalClient:
             domain: Domain name to query
 
         Returns:
-            VirusTotalReputation or None if request fails
+            VirusTotalReputation or None if domain not yet analyzed
+
+        Raises:
+            requests.RequestException: On API errors (rate limit, network, auth).
+                Caller is responsible for error handling and negative caching.
         """
         headers = {"x-apikey": self.api_key}
 
-        try:
-            resp = requests.get(
-                f"{VT_API_URL}/{domain}",
-                headers=headers,
-                timeout=self.timeout,
-            )
+        resp = requests.get(
+            f"{VT_API_URL}/{domain}",
+            headers=headers,
+            timeout=self.timeout,
+        )
 
-            if resp.status_code == 404:
-                # Domain not found in VT (not analyzed yet)
-                logger.debug(f"Domain not yet in VirusTotal: {domain}")
-                return VirusTotalReputation(domain=domain)
+        if resp.status_code == 404:
+            # Domain not found in VT (not analyzed yet)
+            logger.debug(f"Domain not yet in VirusTotal: {domain}")
+            return VirusTotalReputation(domain=domain)
 
-            resp.raise_for_status()
+        resp.raise_for_status()
 
-            data = resp.json()
-            attrs = data.get("data", {}).get("attributes", {})
-            last_analysis = attrs.get("last_analysis_stats", {})
+        data = resp.json()
+        attrs = data.get("data", {}).get("attributes", {})
+        last_analysis = attrs.get("last_analysis_stats", {})
 
-            # Parse last analysis date
-            last_analysis_date = None
-            if "last_analysis_date" in attrs:
-                try:
-                    last_analysis_date = datetime.fromtimestamp(
-                        attrs["last_analysis_date"]
-                    )
-                except (TypeError, ValueError):
-                    pass
+        # Parse last analysis date
+        last_analysis_date = None
+        if "last_analysis_date" in attrs:
+            try:
+                last_analysis_date = datetime.fromtimestamp(
+                    attrs["last_analysis_date"]
+                )
+            except (TypeError, ValueError):
+                pass
 
-            reputation = VirusTotalReputation(
-                domain=domain,
-                malicious_count=last_analysis.get("malicious", 0),
-                suspicious_count=last_analysis.get("suspicious", 0),
-                undetected_count=last_analysis.get("undetected", 0),
-                harmless_count=last_analysis.get("harmless", 0),
-                last_analysis_date=last_analysis_date,
-                last_analysis_stats=last_analysis,
-            )
+        reputation = VirusTotalReputation(
+            domain=domain,
+            malicious_count=last_analysis.get("malicious", 0),
+            suspicious_count=last_analysis.get("suspicious", 0),
+            undetected_count=last_analysis.get("undetected", 0),
+            harmless_count=last_analysis.get("harmless", 0),
+            last_analysis_date=last_analysis_date,
+            last_analysis_stats=last_analysis,
+        )
 
-            logger.debug(f"VirusTotal lookup: {domain} - {reputation.summary()}")
-            return reputation
-
-        except requests.RequestException as e:
-            logger.warning(f"VirusTotal API error: {e}")
-            return None
+        logger.debug(f"VirusTotal lookup: {domain} - {reputation.summary()}")
+        return reputation
 
     def get_stats(self) -> dict:
         """Get client statistics."""
