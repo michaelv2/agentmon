@@ -739,7 +739,7 @@ def listen(
         print_stats()
 
 
-@cli.command()
+@main.command()
 @click.pass_context
 def feeds(ctx: click.Context) -> None:
     """Manage threat intelligence feeds.
