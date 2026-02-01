@@ -6,7 +6,9 @@ results to a larger model for deeper analysis.
 
 import json
 import logging
+import os
 import re
+import requests
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -226,6 +228,28 @@ class DomainClassifier:
             "size": len(self._cache),
         }
 
+    def _unload_model(self, model: str) -> None:
+        """Force unload a model using Ollama HTTP API.
+
+        The Python SDK's keep_alive parameter doesn't seem to work reliably,
+        so we use the HTTP API directly to send a generate request with keep_alive=0.
+        """
+        try:
+            ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+            url = f"{ollama_host}/api/generate"
+            payload = {
+                "model": model,
+                "prompt": "",
+                "keep_alive": 0,
+            }
+            response = requests.post(url, json=payload, timeout=5)
+            if response.status_code == 200:
+                logger.debug(f"Unloaded {model} via HTTP API")
+            else:
+                logger.debug(f"Failed to unload {model}: HTTP {response.status_code}")
+        except Exception as e:
+            logger.debug(f"Failed to unload {model}: {e}")
+
     def classify(
         self,
         domain: str,
@@ -238,7 +262,7 @@ class DomainClassifier:
         Results are cached by domain for fast repeated lookups.
 
         1. Check cache for previous classification
-        2. Fast triage model classifies first
+        2. Fast triage model classifies first (auto-unloads after 1s via keep_alive)
         3. If suspicious/low-confidence, escalation model re-classifies
 
         Args:
@@ -286,6 +310,8 @@ class DomainClassifier:
 
         if not needs_escalation or self.config.triage_model == self.config.escalation_model:
             self._cache[domain] = triage_result
+            # Unload triage model now that result is cached
+            self._unload_model(self.config.triage_model)
             return triage_result
 
         # Step 3: Escalate (with optional VirusTotal context)
@@ -308,11 +334,14 @@ class DomainClassifier:
         if escalation_result is None:
             # Fall back to triage result
             self._cache[domain] = triage_result
+            self._unload_model(self.config.triage_model)
             return triage_result
 
         escalation_result.escalated = True
         escalation_result.triage_category = triage_result.category.value
         self._cache[domain] = escalation_result
+        # Unload triage model after escalation completes
+        self._unload_model(self.config.triage_model)
         return escalation_result
 
     def _query_model(
@@ -344,10 +373,18 @@ class DomainClassifier:
         )
 
         try:
+            # Set keep_alive to 1s for triage model to free memory quickly
+            # Escalation model uses default keep_alive for potential follow-up requests
+            keep_alive = 1 if model == self.config.triage_model else None
+
+            if keep_alive is not None:
+                logger.debug(f"Using keep_alive={keep_alive}s for {model}")
+
             response = self._client.chat(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 options={"temperature": 0.1},
+                keep_alive=keep_alive,
             )
 
             content = response["message"]["content"]
