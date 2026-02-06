@@ -321,10 +321,28 @@ class DNSBaselineAnalyzer:
             )
         return None
 
+    @staticmethod
+    def _matches_at_label_boundary(domain: str, pattern: str) -> bool:
+        """Check if pattern appears at a domain label boundary.
+
+        Matches when the pattern starts at position 0 or immediately after a
+        dot, preventing partial mid-label matches like 'c2-' inside 'ec2-'.
+        """
+        d = domain.lower()
+        p = pattern.lower()
+        idx = 0
+        while True:
+            idx = d.find(p, idx)
+            if idx == -1:
+                return False
+            if idx == 0 or d[idx - 1] == ".":
+                return True
+            idx += 1
+
     def _check_known_bad(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
         """Check if domain matches known-bad patterns."""
         for pattern in self.config.known_bad_patterns:
-            if pattern.lower() in domain_lower:
+            if self._matches_at_label_boundary(domain_lower, pattern):
                 return Alert(
                     id=str(uuid.uuid4()),
                     timestamp=event.timestamp,

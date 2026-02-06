@@ -51,7 +51,9 @@ learning_mode = false
 # within this window (seconds). Set to 0 to disable.
 alert_dedup_window = 600  # 10 minutes
 
-# Known-bad domain patterns (substring match, case-insensitive)
+# Known-bad domain patterns (label-boundary match, case-insensitive)
+# Patterns match at the start of a domain label (after '.' or at domain start)
+# e.g. "c2-" matches "c2-server.net" but NOT "ec2-35-169.amazonaws.com"
 # Organized by threat category - customize for your environment
 known_bad_patterns = [
     # === TIER 1: C2 FRAMEWORKS (High confidence) ===
