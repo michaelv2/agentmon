@@ -1,0 +1,38 @@
+[Unit]
+Description=agentmon - DNS activity monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/agentmon/.venv/bin/agentmon listen
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/agentmon/environment
+
+# Paths
+WorkingDirectory=/var/lib/agentmon
+
+# Isolation
+User=agentmon
+Group=agentmon
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentmon
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentmon
+
+[Install]
+WantedBy=multi-user.target

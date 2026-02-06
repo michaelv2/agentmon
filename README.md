@@ -376,6 +376,48 @@ See [SECURITY.md](SECURITY.md) for:
 - Deployment hardening recommendations
 - How to report vulnerabilities
 
+## Production Deployment
+
+### systemd service
+
+agentmon ships with a systemd unit file for running as a daemon.
+
+```bash
+# 1. Create a dedicated user
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin agentmon
+
+# 2. Create data and config directories
+sudo mkdir -p /var/lib/agentmon
+sudo chown agentmon:agentmon /var/lib/agentmon
+sudo mkdir -p /etc/agentmon
+
+# 3. Copy config (edit to taste)
+sudo cp config/agentmon.example.toml /etc/agentmon/agentmon.toml
+
+# 4. Create environment file for secrets
+sudo tee /etc/agentmon/environment << 'EOF'
+# Uncomment and set as needed:
+# AGENTMON_VIRUSTOTAL_API_KEY=your-key-here
+# OLLAMA_HOST=http://localhost:11434
+EOF
+sudo chmod 600 /etc/agentmon/environment
+
+# 5. Install the service
+sudo cp config/agentmon.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentmon
+```
+
+### Service management
+
+```bash
+sudo systemctl status agentmon     # Check status
+sudo journalctl -u agentmon -f     # Follow logs
+sudo systemctl restart agentmon    # Restart after config changes
+```
+
+The service runs with security hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`) and stores its DuckDB database in `/var/lib/agentmon/`. Config is auto-discovered from `/etc/agentmon/agentmon.toml`.
+
 ## Architecture Details
 
 See [SMART_ANALYZE.md](docs/SMART_ANALYZE.md) for technical details on:
