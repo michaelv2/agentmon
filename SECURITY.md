@@ -39,6 +39,10 @@ Last audit: 2026-03-04
 | HIGH | Slack webhook in plaintext config | Support AGENTMON_SLACK_WEBHOOK env var override |
 | HIGH | ReDoS in syslog parser | Added MAX_SYSLOG_MESSAGE_LENGTH (8KB) limit |
 | MEDIUM | Slack webhook URL logging risk | Truncate error response body to 200 chars before logging |
+| MEDIUM | Database path traversal | Validate db_path against allowlist of directories (`ALLOWED_DB_DIRS`) |
+| MEDIUM | No validation on known-bad patterns | Reject patterns shorter than 2 characters at config load |
+| MEDIUM | Missing IP validation for allowlist | Validate `allowed_ips` with `ipaddress.ip_address()` at config load |
+| MEDIUM | DuckDB temporary file exposure | Set 0o600 on temp DB copies (covered by LOW db permissions fix) |
 | LOW | LLM response validation | Clamp confidence to [0,1], validate category enum, sanitize inputs |
 | LOW | No rate limiting on syslog | Per-IP token bucket rate limiting via `rate_limit_per_second` config |
 | LOW | Paramiko AutoAddPolicy | Use `RejectPolicy` + `load_system_host_keys()` |
@@ -47,61 +51,6 @@ Last audit: 2026-03-04
 | LOW | Missing database file permissions | Set 0o600 on DB files after creation and on temp copies |
 
 ### Known Issues (TODO)
-
-#### MEDIUM: Database Path Traversal
-
-**Location:** `agentmon/config.py:110`
-
-**Risk:** Malicious config could write database to arbitrary locations (web roots, system directories).
-
-**Mitigation:** Validate paths against an allowlist of directories:
-```python
-ALLOWED_DB_DIRS = [
-    Path.home() / ".local" / "share" / "agentmon",
-    Path("/var/lib/agentmon"),
-]
-```
-
-#### MEDIUM: No Validation on Known-Bad Patterns
-
-**Location:** `agentmon/analyzers/dns_baseline.py:286`
-
-**Risk:** Empty string or single-character patterns match all/most domains, causing alert floods.
-
-**Mitigation:** Reject patterns shorter than 2-3 characters.
-
-#### MEDIUM: Missing IP Validation for Allowlist
-
-**Location:** `agentmon/config.py:150-151`
-
-**Risk:** The configuration loader accepts `allowed_ips` without validating that entries are actually valid IP addresses. Invalid IPs (typos, malformed entries) would silently fail to match, effectively disabling the allowlist.
-
-**Mitigation:**
-```python
-import ipaddress
-
-for ip_str in raw_ips:
-    try:
-        ipaddress.ip_address(ip_str)
-        validated_ips.append(ip_str)
-    except ValueError:
-        logger.error(f"Invalid IP in allowed_ips: {ip_str} - ignoring")
-```
-
-#### MEDIUM: DuckDB Temporary File Exposure
-
-**Location:** `agentmon/storage/db.py:44-60`
-
-**Risk:** When opening a database in read-only mode and encountering a lock, the code copies the database to a temporary directory. The copied file may inherit overly permissive permissions, allowing other local users to read DNS query history on shared systems.
-
-**Mitigation:**
-```python
-import os
-import stat
-
-# After copying to temp directory
-os.chmod(self._temp_db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-```
 
 #### MEDIUM: Missing TLS for Syslog
 

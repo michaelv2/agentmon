@@ -5,6 +5,7 @@ Loads settings from TOML config file with CLI override support.
 
 import fcntl
 import hashlib
+import ipaddress
 import logging
 import os
 from dataclasses import dataclass, field
@@ -152,6 +153,66 @@ class Config:
     anthropic_api_key: Optional[str] = None
 
 
+# Allowed parent directories for database files.
+# Paths outside these directories trigger a warning (defense-in-depth).
+ALLOWED_DB_DIRS = [
+    Path.home() / ".local" / "share" / "agentmon",
+    Path("/var/lib/agentmon"),
+]
+
+# Minimum length for known-bad patterns (shorter patterns cause alert floods).
+MIN_KNOWN_BAD_PATTERN_LENGTH = 2
+
+
+def _validate_db_path(db_path: Path) -> None:
+    """Warn if db_path resolves outside allowed directories."""
+    if str(db_path) == ":memory:":
+        return
+
+    resolved = db_path.expanduser().resolve()
+    for allowed_dir in ALLOWED_DB_DIRS:
+        try:
+            allowed_resolved = allowed_dir.resolve()
+            resolved.relative_to(allowed_resolved)
+            return  # Path is under an allowed directory
+        except ValueError:
+            continue
+
+    logger.warning(
+        "Database path %s resolves outside allowed directories %s. "
+        "This could be a path traversal risk.",
+        resolved,
+        [str(d) for d in ALLOWED_DB_DIRS],
+    )
+
+
+def _validate_allowed_ips(raw_ips: list[str]) -> list[str]:
+    """Validate IP addresses in allowed_ips, rejecting invalid entries."""
+    validated: list[str] = []
+    for ip_str in raw_ips:
+        try:
+            ipaddress.ip_address(ip_str)
+            validated.append(ip_str)
+        except ValueError:
+            logger.error("Invalid IP in allowed_ips: %s — ignoring", ip_str)
+    return validated
+
+
+def _validate_known_bad_patterns(patterns: list[str]) -> list[str]:
+    """Filter out known-bad patterns that are too short to be useful."""
+    validated: list[str] = []
+    for pattern in patterns:
+        if len(pattern) < MIN_KNOWN_BAD_PATTERN_LENGTH:
+            logger.warning(
+                "Known-bad pattern %r is too short (< %d chars) — ignoring",
+                pattern,
+                MIN_KNOWN_BAD_PATTERN_LENGTH,
+            )
+            continue
+        validated.append(pattern)
+    return validated
+
+
 def _verify_config_integrity(config_path: Path, raw_bytes: bytes) -> None:
     """Check config file against optional SHA256 sidecar file.
 
@@ -211,6 +272,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         db = data["database"]
         if "path" in db:
             config.db_path = Path(db["path"]).expanduser()
+            _validate_db_path(config.db_path)
 
     # Syslog section
     if "syslog" in data:
@@ -222,7 +284,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         if "bind_address" in syslog:
             config.syslog_bind_address = syslog["bind_address"]
         if "allowed_ips" in syslog:
-            config.syslog_allowed_ips = syslog["allowed_ips"]
+            config.syslog_allowed_ips = _validate_allowed_ips(syslog["allowed_ips"])
 
     # Analyzer section
     if "analyzer" in data:
@@ -234,7 +296,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         if "learning_mode" in analyzer:
             config.learning_mode = analyzer["learning_mode"]
         if "known_bad_patterns" in analyzer:
-            config.known_bad_patterns = analyzer["known_bad_patterns"]
+            config.known_bad_patterns = _validate_known_bad_patterns(analyzer["known_bad_patterns"])
         if "allowlist" in analyzer:
             config.allowlist = set(analyzer["allowlist"])
         if "ignore_suffixes" in analyzer:
