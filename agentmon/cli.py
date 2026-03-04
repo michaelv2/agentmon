@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+import signal
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +16,7 @@ from agentmon.analyzers import ConnectionAnalyzer, ConnectionAnalyzerConfig, DNS
 from agentmon.analyzers.dns_baseline import AnalyzerConfig
 from agentmon.collectors import PiholeCollector
 from agentmon.collectors.pihole import PiholeConfig
-from agentmon.config import load_config, find_config_file
+from agentmon.config import find_config_file, load_config, reload_tunable_config
 from agentmon.models import Severity
 from agentmon.policies import DeviceManager, ParentalControlAnalyzer
 from agentmon.storage import EventStore
@@ -512,6 +514,26 @@ def listen(
         )
         device_activity_analyzer = DeviceActivityAnalyzer(store, activity_config)
 
+    # Initialize volume anomaly analyzer if configured
+    volume_anomaly_analyzer = None
+    if cfg.volume_anomaly_enabled:
+        from agentmon.analyzers.volume_anomaly import VolumeAnomalyAnalyzer, VolumeAnomalyConfig
+
+        volume_config = VolumeAnomalyConfig(
+            enabled=True,
+            learning_days=cfg.volume_anomaly_learning_days,
+            sensitivity_sigma=cfg.volume_anomaly_sensitivity_sigma,
+            min_samples=cfg.volume_anomaly_min_samples,
+            min_query_threshold=cfg.volume_anomaly_min_query_threshold,
+            min_domain_threshold=cfg.volume_anomaly_min_domain_threshold,
+            sustained_hours=cfg.volume_anomaly_sustained_hours,
+            spike_severity=Severity(cfg.volume_anomaly_spike_severity),
+            diversity_severity=Severity(cfg.volume_anomaly_diversity_severity),
+            sustained_severity=Severity(cfg.volume_anomaly_sustained_severity),
+            devices=cfg.volume_anomaly_devices,
+        )
+        volume_anomaly_analyzer = VolumeAnomalyAnalyzer(store, volume_config)
+
     # Initialize client resolver if configured
     client_resolver = None
     if cfg.resolver_enabled:
@@ -529,6 +551,27 @@ def listen(
     # Initialize connection analyzer
     conn_analyzer_config = ConnectionAnalyzerConfig(learning_mode=use_learning)
     connection_analyzer = ConnectionAnalyzer(store, conn_analyzer_config)
+
+    # Initialize OODA watchdog if configured
+    watchdog = None
+    if cfg.watchdog_enabled and cfg.anthropic_api_key:
+        from agentmon.llm.anthropic_client import AnthropicClient, AnthropicConfig
+        from agentmon.watchdog import OODAWatchdog
+
+        watchdog_llm_config = AnthropicConfig(
+            model=cfg.watchdog_model,
+            max_tokens=cfg.watchdog_max_tokens_per_cycle,
+        )
+        watchdog_llm = AnthropicClient(cfg.anthropic_api_key, watchdog_llm_config)
+        if watchdog_llm.available:
+            watchdog = OODAWatchdog(
+                store=store,
+                llm=watchdog_llm,
+                interval_minutes=cfg.watchdog_interval_minutes,
+                max_tokens_per_cycle=cfg.watchdog_max_tokens_per_cycle,
+                window_minutes=cfg.watchdog_window_minutes,
+                config_path=ctx.obj.get("config_path"),
+            )
 
     def handle_message(msg: SyslogMessage) -> None:
         """Process a received syslog message."""
@@ -595,6 +638,11 @@ def listen(
             if device_activity_analyzer:
                 activity_alerts = device_activity_analyzer.analyze_event(dns_event)
                 alerts.extend(activity_alerts)
+
+            # Analyze for volume anomalies
+            if volume_anomaly_analyzer:
+                volume_alerts = volume_anomaly_analyzer.analyze_event(dns_event)
+                alerts.extend(volume_alerts)
 
             for alert in alerts:
                 stats["alerts"] += 1
@@ -748,6 +796,19 @@ def listen(
                 f"threshold={cfg.device_activity_threshold}q/h, "
                 f"{device_count} named devices[/cyan]"
             )
+        if volume_anomaly_analyzer:
+            device_count = len(cfg.volume_anomaly_devices)
+            console.print(
+                f"[cyan]Volume anomaly: learning={cfg.volume_anomaly_learning_days}d, "
+                f"sigma={cfg.volume_anomaly_sensitivity_sigma}, "
+                f"sustained={cfg.volume_anomaly_sustained_hours}h, "
+                f"{device_count} named devices[/cyan]"
+            )
+        if watchdog:
+            console.print(
+                f"[cyan]OODA watchdog: interval={cfg.watchdog_interval_minutes}m, "
+                f"model={cfg.watchdog_model}[/cyan]"
+            )
         if client_resolver:
             mapping_count = len(cfg.resolver_mappings)
             console.print(
@@ -764,16 +825,81 @@ def listen(
         console.print("[dim]Press Ctrl+C to stop[/dim]")
         console.print()
 
+        # Write pidfile for SIGHUP-based config reload
+        pid_path = Path("/run/agentmon.pid") if Path("/run").is_dir() else cfg.db_path.parent / "agentmon.pid"
+        pid_path.write_text(str(os.getpid()))
+        logger = logging.getLogger("agentmon.cli")
+        logger.info("PID %d written to %s", os.getpid(), pid_path)
+
+        # Resolve config_path for reload (may be None if using search)
+        reload_config_path: Path | None = ctx.obj.get("config_path")
+
+        def handle_sighup() -> None:
+            """Reload tunable config fields on SIGHUP."""
+            nonlocal cfg, parental_analyzer
+
+            new_cfg, changes = reload_tunable_config(reload_config_path, cfg)
+            if not changes:
+                logger.info("SIGHUP received, no config changes detected")
+                return
+
+            for change in changes:
+                logger.info("Config reload: %s", change)
+
+            # Update analyzer tunable fields
+            analyzer.config.allowlist = new_cfg.allowlist
+            analyzer.config.known_bad_patterns = new_cfg.known_bad_patterns
+            analyzer.config.entropy_threshold = new_cfg.entropy_threshold
+            analyzer.config.entropy_min_length = new_cfg.entropy_min_length
+            analyzer.config.ignore_suffixes = new_cfg.ignore_suffixes
+
+            # Recreate dedup cache if window changed
+            if new_cfg.alert_dedup_window != cfg.alert_dedup_window:
+                from cachetools import TTLCache
+                analyzer.config.alert_dedup_window = new_cfg.alert_dedup_window
+                analyzer._alert_cache = TTLCache(
+                    maxsize=5000, ttl=new_cfg.alert_dedup_window
+                )
+
+            # Rebuild parental control analyzer if policies/devices changed
+            if parental_analyzer and (
+                new_cfg.parental_devices != cfg.parental_devices
+                or new_cfg.parental_policies != cfg.parental_policies
+            ):
+                device_manager = DeviceManager(
+                    new_cfg.parental_devices, new_cfg.parental_policies
+                )
+                parental_analyzer = ParentalControlAnalyzer(device_manager)
+
+            # Update the active config so ignore_suffixes in handle_message
+            # and other references use the new values
+            cfg = new_cfg
+
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGHUP, handle_sighup)
+
         # Start periodic cleanup task if retention is enabled
         cleanup_task = None
         if cfg.retention_enabled:
             cleanup_task = asyncio.create_task(periodic_cleanup())
+
+        # Start watchdog periodic loop if configured
+        watchdog_task = None
+        if watchdog:
+            watchdog_task = asyncio.create_task(watchdog.run_periodic())
 
         try:
             await receiver.run_forever()
         except (asyncio.CancelledError, KeyboardInterrupt):
             pass
         finally:
+            if watchdog_task:
+                watchdog.stop()
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
             if cleanup_task:
                 cleanup_task.cancel()
                 try:
@@ -784,7 +910,10 @@ def listen(
                 await slack_notifier.close()
             if device_activity_analyzer:
                 device_activity_analyzer.flush()
+            if volume_anomaly_analyzer:
+                volume_anomaly_analyzer.flush()
             store.close()
+            pid_path.unlink(missing_ok=True)
             print_stats()
 
     try:

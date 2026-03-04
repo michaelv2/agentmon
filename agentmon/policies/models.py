@@ -21,6 +21,7 @@ class TimeRule:
     end: str  # "17:00"
     days: list[str]  # ["mon", "tue", "wed", "thu", "fri"]
     allowed_categories: Optional[list[str]] = None
+    block_all: bool = False
 
 
 @dataclass
@@ -46,14 +47,14 @@ class ParentalPolicy:
 
 @dataclass
 class Device:
-    """Maps a device to a policy.
+    """Maps a device to one or more policies.
 
     Attributes:
         name: Human-readable device name (e.g., "alice-laptop")
         client_ips: List of IP addresses associated with this device
-        policy_name: Name of the policy to apply
+        policy_names: Names of the policies to apply (most-restrictive-wins)
     """
 
     name: str
     client_ips: list[str]
-    policy_name: str
+    policy_names: list[str]

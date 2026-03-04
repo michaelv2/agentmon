@@ -191,7 +191,7 @@ Get a free VirusTotal API key at: https://www.virustotal.com/gui/my-apikey
 
 ```bash
 # Set API key via environment variable (recommended)
-export AGENTMON_VIRUSTOTAL_API_KEY="your-api-key-here"
+export VIRUSTOTAL_API_KEY="your-api-key-here"
 agentmon listen --port 1514 --llm
 ```
 
@@ -199,7 +199,7 @@ Or configure in `agentmon.toml`:
 
 ```toml
 [virustotal]
-# API key - SECURITY: Prefer environment variable (AGENTMON_VIRUSTOTAL_API_KEY)
+# API key - SECURITY: Prefer environment variable (VIRUSTOTAL_API_KEY)
 # api_key = "YOUR_API_KEY_HERE"
 
 # Cache VirusTotal results for 24 hours
@@ -397,7 +397,7 @@ sudo cp config/agentmon.example.toml /etc/agentmon/agentmon.toml
 # 4. Create environment file for secrets
 sudo tee /etc/agentmon/environment << 'EOF'
 # Uncomment and set as needed:
-# AGENTMON_VIRUSTOTAL_API_KEY=your-key-here
+# VIRUSTOTAL_API_KEY=your-key-here
 # OLLAMA_HOST=http://localhost:11434
 EOF
 sudo chmod 600 /etc/agentmon/environment

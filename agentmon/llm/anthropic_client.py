@@ -14,6 +14,15 @@ logger = logging.getLogger(__name__)
 ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 
 
+@dataclass(frozen=True, slots=True)
+class CompletionResult:
+    """Result from an Anthropic API call with token usage."""
+
+    text: str
+    input_tokens: int
+    output_tokens: int
+
+
 @dataclass
 class AnthropicConfig:
     """Configuration for the Anthropic client."""
@@ -80,6 +89,47 @@ class AnthropicClient:
                 if block.type == "text":
                     return block.text  # type: ignore[return-value]
             return None
+        except Exception as e:
+            logger.error(f"Anthropic API error: {e}")
+            return None
+
+    def complete_with_usage(
+        self, system_prompt: str, user_message: str
+    ) -> CompletionResult | None:
+        """Send a prompt to Claude and return text + token usage.
+
+        Args:
+            system_prompt: System-level instructions.
+            user_message: The user message / query content.
+
+        Returns:
+            CompletionResult with text and token counts, or None on failure.
+        """
+        if not self._available or self._client is None:
+            return None
+
+        try:
+            response = self._client.messages.create(  # type: ignore[union-attr]
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+                temperature=self.config.temperature,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            # Extract text from response
+            text: str | None = None
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text  # type: ignore[assignment]
+                    break
+            if text is None:
+                return None
+
+            return CompletionResult(
+                text=text,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+            )
         except Exception as e:
             logger.error(f"Anthropic API error: {e}")
             return None

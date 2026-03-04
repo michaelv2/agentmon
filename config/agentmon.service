@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/opt/agentmon/.venv/bin/agentmon listen
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/run/agentmon.pid
 Restart=on-failure
 RestartSec=10
 StartLimitIntervalSec=300

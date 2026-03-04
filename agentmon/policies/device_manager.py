@@ -41,24 +41,24 @@ class DeviceManager:
         """
         return self._ip_to_device.get(client_ip)
 
-    def get_policy(self, client_ip: str) -> Optional[tuple[Device, ParentalPolicy]]:
-        """Look up device and policy by client IP.
+    def get_policies(self, client_ip: str) -> Optional[tuple[Device, list[ParentalPolicy]]]:
+        """Look up device and policies by client IP.
 
         Args:
             client_ip: IP address of the client
 
         Returns:
-            Tuple of (Device, ParentalPolicy) if found, None otherwise
+            Tuple of (Device, list[ParentalPolicy]) if found, None otherwise
         """
         device = self._ip_to_device.get(client_ip)
         if not device:
             return None
 
-        policy = self._policies.get(device.policy_name)
-        if not policy:
+        policies = [self._policies[n] for n in device.policy_names if n in self._policies]
+        if not policies:
             return None
 
-        return (device, policy)
+        return (device, policies)
 
     def get_all_devices(self) -> list[Device]:
         """Return all configured devices."""

@@ -168,7 +168,7 @@ downgrade_confidence = 0.8  # Minimum confidence to trust downgrade
 # Get API key at: https://www.virustotal.com/gui/my-apikey
 [virustotal]
 # API key - SECURITY: Use environment variable instead of config file:
-#   export AGENTMON_VIRUSTOTAL_API_KEY="your-api-key-here"
+#   export VIRUSTOTAL_API_KEY="your-api-key-here"
 # api_key = "YOUR_API_KEY_HERE"
 
 [alerting]
@@ -200,17 +200,18 @@ min_severity = "medium"
 enabled = false
 
 # Map devices (by IP) to policies
-# Each device can have one policy; multiple IPs can map to the same device
+# Each device can have one or more policies; most-restrictive-wins when they overlap
+# Use "policies" (list) for multiple policies, or "policy" (string) for a single one
 
 [[parental_controls.devices]]
 name = "alice-laptop"
 client_ips = ["192.168.1.50"]
-policy = "homework"
+policies = ["downtime", "homework"]
 
 [[parental_controls.devices]]
 name = "bob-gaming"
 client_ips = ["192.168.1.51"]
-policy = "after-school"
+policies = ["downtime", "after-school"]
 
 # Define policies
 # Each policy specifies blocked categories, allowed domains, and time rules
@@ -237,6 +238,16 @@ end = "20:00"
 days = ["sat", "sun"]
 # If allowed_categories is set, ONLY these categories are allowed during this window
 allowed_categories = ["games", "entertainment", "educational"]
+
+[parental_controls.policies.downtime]
+description = "No activity during sleeping hours"
+alert_severity = "high"
+
+[[parental_controls.policies.downtime.time_rules]]
+start = "22:00"
+end = "07:00"
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+block_all = true
 
 # Available categories for blocking/allowing:
 #   games        - Roblox, Fortnite, Minecraft, Steam, etc.
@@ -373,6 +384,85 @@ alerts_days = 90
 
 # Run cleanup at startup and then every N hours
 cleanup_interval_hours = 24
+
+# =============================================================================
+# VOLUME ANOMALY DETECTION
+# =============================================================================
+# Statistical detection of query rate spikes, domain diversity bursts, and
+# sustained behavioral shifts using Welford's online algorithm for running
+# mean + variance per device per time slot.
+#
+# Complements DNS baseline (what) and device activity (when) by detecting
+# how much. A rogue agent hammering known domains at 10x normal rate would
+# be invisible to pattern-based detection but caught here.
+#
+# Example use case:
+#   Device 192.168.1.50 normally makes ~30 queries/hour on Tuesday 2pm.
+#   At Tuesday 2pm, it suddenly makes 300 queries.
+#   → Alert: "Query rate spike: alice-laptop at 14:00" (z=4.2)
+
+[volume_anomaly]
+enabled = false
+
+# Learning period before generating alerts (days)
+learning_days = 14
+
+# Z-score threshold — how many standard deviations above the mean triggers alert
+# 3.0 ≈ 0.1% false alarm rate (recommended)
+# 2.5 = more sensitive, 4.0 = fewer alerts
+sensitivity_sigma = 3.0
+
+# Minimum baseline observations before detecting anomalies
+min_samples = 7
+
+# Absolute minimums — don't alert on tiny volumes even if z-score is high
+# Prevents false positives on devices with very low normal activity
+min_query_threshold = 20    # Must have at least this many queries to spike
+min_domain_threshold = 10   # Must have at least this many domains for burst
+
+# Consecutive anomalous hours before "sustained behavioral shift" alert
+sustained_hours = 3
+
+# Alert severities by type
+spike_severity = "medium"       # Single-hour query rate spike
+diversity_severity = "high"     # Single-hour domain diversity burst
+sustained_severity = "high"     # Multi-hour sustained elevation
+
+# Named devices for better alert messages (optional)
+# [[volume_anomaly.devices]]
+# name = "alice-laptop"
+# client_ips = ["192.168.1.50"]
+
+# =============================================================================
+# OODA WATCHDOG (LLM-based continuous monitoring)
+# =============================================================================
+# Always-on LLM that periodically evaluates traffic snapshots in an
+# Observe-Orient-Decide-Act loop, catching patterns that formulaic rules miss.
+#
+# Requires ANTHROPIC_API_KEY environment variable.
+#
+# This is a PoC for financial risk management OODA loops, with the LLM
+# receiving self-awareness metrics about its own operational footprint
+# (tokens used, cost, latency) in each cycle.
+#
+# Example: the watchdog might notice that a device is querying the same
+# 5 domains repeatedly every 30 seconds (C2 beaconing pattern) — something
+# that wouldn't trigger rate spike or diversity alerts individually.
+
+[watchdog]
+enabled = false
+
+# Minutes between OODA cycles
+interval_minutes = 15
+
+# Claude model to use for analysis
+model = "claude-sonnet-4-6"
+
+# Max output tokens per LLM call (controls response verbosity and cost)
+max_tokens_per_cycle = 1024
+
+# Traffic window to observe (default: 2x interval)
+# window_minutes = 30
 
 # ==============================================================================
 # Threat Intelligence Feeds

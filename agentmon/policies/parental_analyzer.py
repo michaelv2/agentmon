@@ -16,6 +16,14 @@ from agentmon.policies.models import Device, ParentalPolicy, TimeRule
 logger = logging.getLogger(__name__)
 
 # Map day abbreviations to weekday numbers (Monday=0)
+_SEVERITY_ORDER = {
+    Severity.INFO: 0,
+    Severity.LOW: 1,
+    Severity.MEDIUM: 2,
+    Severity.HIGH: 3,
+    Severity.CRITICAL: 4,
+}
+
 DAY_MAP = {
     "mon": 0,
     "tue": 1,
@@ -50,79 +58,119 @@ class ParentalControlAnalyzer:
     def analyze_event(self, event: DNSEvent) -> list[Alert]:
         """Analyze a DNS event against parental policies.
 
+        Evaluates the event against all policies assigned to the device.
+        Each policy is checked independently; most-restrictive-wins semantics
+        apply (any policy can trigger an alert). Alerts are deduplicated by
+        policy name.
+
         Args:
             event: DNS event to analyze
 
         Returns:
             List of alerts (empty if no policy violations)
         """
-        # Look up device and policy
-        result = self.device_manager.get_policy(event.client)
+        result = self.device_manager.get_policies(event.client)
         if not result:
-            return []  # No policy for this client
-
-        device, policy = result
-        category = classify_domain(event.domain)
-
-        # Check whitelist first (exact match or suffix match)
-        if self._is_whitelisted(event.domain, policy.allowed_domains):
             return []
 
-        # Check if we're in a time-restricted window
-        active_rule = self._get_active_time_rule(policy, event.timestamp)
+        device, policies = result
+        category = classify_domain(event.domain)
+        alerts: list[Alert] = []
+        seen_policies: set[str] = set()
 
-        if active_rule:
-            # During restricted hours
-            if active_rule.allowed_categories is not None:
-                # Strict mode: only allowed_categories permitted
-                if category not in active_rule.allowed_categories:
-                    if category == "unknown":
-                        return [
-                            self._create_alert(
-                                event,
-                                device,
-                                policy,
-                                category,
-                                "Unknown domain during restricted hours - whitelist if legitimate",
-                            )
-                        ]
-                    else:
-                        return [
-                            self._create_alert(
-                                event,
-                                device,
-                                policy,
-                                category,
-                                f"Category '{category}' not in allowed list during restricted hours",
-                            )
-                        ]
-            else:
-                # Block mode: blocked_categories are denied
-                if category in policy.blocked_categories:
-                    return [
-                        self._create_alert(
-                            event,
-                            device,
-                            policy,
-                            category,
-                            f"Category '{category}' blocked during restricted hours",
-                        )
-                    ]
-                elif category == "unknown":
-                    # Alert on unknown domains during restricted hours
-                    return [
-                        self._create_alert(
-                            event,
-                            device,
-                            policy,
-                            category,
-                            "Unknown domain during restricted hours - whitelist if legitimate",
-                        )
-                    ]
+        for policy in policies:
+            # Check whitelist: if this policy whitelists the domain, skip it
+            if self._is_whitelisted(event.domain, policy.allowed_domains):
+                continue
 
-        # Outside restricted hours: no alerts for parental controls
-        # (Security analyzer still runs separately)
-        return []
+            active_rule = self._get_active_time_rule(policy, event.timestamp)
+            if not active_rule:
+                continue
+
+            alert = self._evaluate_rule(event, device, policy, category, active_rule)
+            if alert and policy.name not in seen_policies:
+                seen_policies.add(policy.name)
+                alerts.append(alert)
+
+        # Use highest severity across all triggered alerts
+        if len(alerts) > 1:
+            max_severity = max(
+                (a.severity for a in alerts),
+                key=lambda s: _SEVERITY_ORDER.get(s, 0),
+            )
+            alerts = [
+                Alert(
+                    id=a.id,
+                    timestamp=a.timestamp,
+                    severity=max_severity,
+                    title=a.title,
+                    description=a.description,
+                    source_event_type=a.source_event_type,
+                    client=a.client,
+                    domain=a.domain,
+                    analyzer=a.analyzer,
+                    confidence=a.confidence,
+                    tags=a.tags,
+                )
+                for a in alerts
+            ]
+
+        return alerts
+
+    def _evaluate_rule(
+        self,
+        event: DNSEvent,
+        device: Device,
+        policy: ParentalPolicy,
+        category: str,
+        active_rule: TimeRule,
+    ) -> Alert | None:
+        """Evaluate a single time rule against an event.
+
+        Args:
+            event: DNS event to evaluate
+            device: Device that made the request
+            policy: Policy being evaluated
+            category: Classified category of the domain
+            active_rule: The active time rule to evaluate against
+
+        Returns:
+            Alert if the rule is violated, None otherwise
+        """
+        # Block-all mode: alert on ANY DNS activity during this window
+        if active_rule.block_all:
+            return self._create_alert(
+                event, device, policy, category,
+                "Device active during downtime hours",
+            )
+
+        # During restricted hours
+        if active_rule.allowed_categories is not None:
+            # Strict mode: only allowed_categories permitted
+            if category not in active_rule.allowed_categories:
+                if category == "unknown":
+                    return self._create_alert(
+                        event, device, policy, category,
+                        "Unknown domain during restricted hours - whitelist if legitimate",
+                    )
+                return self._create_alert(
+                    event, device, policy, category,
+                    f"Category '{category}' not in allowed list during restricted hours",
+                )
+        else:
+            # Block mode: blocked_categories are denied
+            if category in policy.blocked_categories:
+                return self._create_alert(
+                    event, device, policy, category,
+                    f"Category '{category}' blocked during restricted hours",
+                )
+            if category == "unknown":
+                return self._create_alert(
+                    event, device, policy, category,
+                    "Unknown domain during restricted hours - whitelist if legitimate",
+                )
+
+        return None
 
     def _is_whitelisted(self, domain: str, allowed_domains: list[str]) -> bool:
         """Check if domain is on the whitelist.
@@ -174,8 +222,14 @@ class ParentalControlAnalyzer:
                 continue
 
             # Check if current time is within the rule's window
-            if rule.start <= current_time <= rule.end:
-                return rule
+            if rule.start <= rule.end:
+                # Same-day window: e.g. 15:00-17:00
+                if rule.start <= current_time <= rule.end:
+                    return rule
+            else:
+                # Overnight window: e.g. 22:00-07:00
+                if current_time >= rule.start or current_time <= rule.end:
+                    return rule
 
         return None
 

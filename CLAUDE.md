@@ -192,7 +192,7 @@ Configuration uses TOML format. See `config/agentmon.example.toml` for comprehen
 - `[analyzer]`: Entropy thresholds, known-bad patterns, allowlists
 - `[llm]`: Ollama models, escalation settings
 - `[threat_feeds]`: URLhaus/Feodo integration
-- `[virustotal]`: API key (prefer env var: `AGENTMON_VIRUSTOTAL_API_KEY`)
+- `[virustotal]`: API key (prefer env var: `VIRUSTOTAL_API_KEY`)
 - `[client_resolver]`: IP → hostname resolution
 - `[device_activity]`: Activity anomaly detection
 - `[retention]`: Data cleanup policies
@@ -256,6 +256,6 @@ Configuration uses TOML format. See `config/agentmon.example.toml` for comprehen
 
 - Default syslog listener binds to 127.0.0.1 (localhost only)
 - Use `--bind` and `--allow` flags to accept remote connections securely
-- VirusTotal API key should use env var (`AGENTMON_VIRUSTOTAL_API_KEY`), not config file
+- VirusTotal API key should use env var (`VIRUSTOTAL_API_KEY`), not config file
 - No sensitive data in logs (IP addresses logged at INFO level only in verbose mode)
 - See `SECURITY.md` for full threat model and hardening recommendations

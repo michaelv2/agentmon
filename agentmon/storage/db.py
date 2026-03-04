@@ -19,7 +19,7 @@ import duckdb
 from agentmon.models import DNSEvent, ConnectionEvent, Alert, Severity
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class EventStore:
@@ -208,6 +208,40 @@ class EventStore:
             )
         """)
 
+        # Volume baseline table (Welford's online algorithm for running stats)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS volume_baseline (
+                client VARCHAR NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                hour_of_day INTEGER NOT NULL,
+                query_count_mean DOUBLE DEFAULT 0.0,
+                query_count_m2 DOUBLE DEFAULT 0.0,
+                domain_count_mean DOUBLE DEFAULT 0.0,
+                domain_count_m2 DOUBLE DEFAULT 0.0,
+                sample_count INTEGER DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (client, day_of_week, hour_of_day)
+            )
+        """)
+
+        # Watchdog observations audit trail
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchdog_observations (
+                id VARCHAR PRIMARY KEY,
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                cycle_number INTEGER NOT NULL,
+                snapshot_json VARCHAR NOT NULL,
+                concerns_json VARCHAR NOT NULL,
+                action_taken VARCHAR NOT NULL,
+                api_latency_ms DOUBLE,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                estimated_cost_usd DOUBLE,
+                model_used VARCHAR,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Create indexes for common queries
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_dns_timestamp
@@ -228,6 +262,10 @@ class EventStore:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_device_activity_client
             ON device_activity_baseline (client)
+        """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_volume_baseline_client
+            ON volume_baseline (client)
         """)
 
     def insert_dns_event(self, event: DNSEvent) -> str:
@@ -649,6 +687,197 @@ class EventStore:
         }
 
     # =========================================================================
+    # Volume Baseline Methods (Welford's Online Algorithm)
+    # =========================================================================
+
+    def update_volume_baseline(
+        self,
+        client: str,
+        day_of_week: int,
+        hour_of_day: int,
+        query_count: int,
+        domain_count: int,
+    ) -> None:
+        """Update volume baseline using Welford's online algorithm.
+
+        Maintains running mean and M2 (sum of squared deviations) for both
+        query count and domain count, enabling O(1) variance computation.
+
+        Args:
+            client: Device IP or hostname.
+            day_of_week: 0=Monday through 6=Sunday.
+            hour_of_day: 0-23.
+            query_count: Number of queries observed this hour.
+            domain_count: Number of unique domains observed this hour.
+        """
+        now = datetime.now(timezone.utc)
+        existing = self.get_volume_baseline(client, day_of_week, hour_of_day)
+
+        if existing is None:
+            # First observation: mean = value, M2 = 0, n = 1
+            self.conn.execute("""
+                INSERT INTO volume_baseline (
+                    client, day_of_week, hour_of_day,
+                    query_count_mean, query_count_m2,
+                    domain_count_mean, domain_count_m2,
+                    sample_count, last_updated
+                ) VALUES (?, ?, ?, ?, 0.0, ?, 0.0, 1, ?)
+            """, [client, day_of_week, hour_of_day,
+                  float(query_count), float(domain_count), now])
+        else:
+            n = existing["sample_count"] + 1
+
+            # Welford update for query_count
+            q_delta = query_count - existing["query_count_mean"]
+            q_new_mean = existing["query_count_mean"] + q_delta / n
+            q_delta2 = query_count - q_new_mean
+            q_new_m2 = existing["query_count_m2"] + q_delta * q_delta2
+
+            # Welford update for domain_count
+            d_delta = domain_count - existing["domain_count_mean"]
+            d_new_mean = existing["domain_count_mean"] + d_delta / n
+            d_delta2 = domain_count - d_new_mean
+            d_new_m2 = existing["domain_count_m2"] + d_delta * d_delta2
+
+            self.conn.execute("""
+                UPDATE volume_baseline SET
+                    query_count_mean = ?,
+                    query_count_m2 = ?,
+                    domain_count_mean = ?,
+                    domain_count_m2 = ?,
+                    sample_count = ?,
+                    last_updated = ?
+                WHERE client = ? AND day_of_week = ? AND hour_of_day = ?
+            """, [q_new_mean, q_new_m2, d_new_mean, d_new_m2,
+                  n, now, client, day_of_week, hour_of_day])
+
+    def get_volume_baseline(
+        self,
+        client: str,
+        day_of_week: int,
+        hour_of_day: int,
+    ) -> Optional[dict]:
+        """Get volume baseline for a specific time slot.
+
+        Returns:
+            Dict with query_count_mean, query_count_m2, domain_count_mean,
+            domain_count_m2, sample_count, last_updated, or None.
+        """
+        result = self.conn.execute("""
+            SELECT query_count_mean, query_count_m2,
+                   domain_count_mean, domain_count_m2,
+                   sample_count, last_updated
+            FROM volume_baseline
+            WHERE client = ? AND day_of_week = ? AND hour_of_day = ?
+        """, [client, day_of_week, hour_of_day]).fetchone()
+
+        if result is None:
+            return None
+
+        return {
+            "query_count_mean": result[0],
+            "query_count_m2": result[1],
+            "domain_count_mean": result[2],
+            "domain_count_m2": result[3],
+            "sample_count": result[4],
+            "last_updated": result[5],
+        }
+
+    def is_volume_anomalous(
+        self,
+        client: str,
+        day_of_week: int,
+        hour_of_day: int,
+        value: float,
+        metric: str = "query_count",
+        sigma: float = 3.0,
+        min_samples: int = 7,
+    ) -> tuple[bool, float]:
+        """Check if a volume metric is anomalously high using z-score.
+
+        Uses Welford's stored M2 to compute variance = M2 / (n - 1),
+        then z = (value - mean) / stddev. Anomaly if z > sigma.
+
+        Args:
+            client: Device IP or hostname.
+            day_of_week: 0=Monday through 6=Sunday.
+            hour_of_day: 0-23.
+            value: Observed value to check.
+            metric: "query_count" or "domain_count".
+            sigma: Z-score threshold for anomaly detection.
+            min_samples: Minimum observations before detecting anomalies.
+
+        Returns:
+            Tuple of (is_anomaly, z_score). Returns (False, 0.0) if
+            insufficient data.
+        """
+        baseline = self.get_volume_baseline(client, day_of_week, hour_of_day)
+
+        if baseline is None or baseline["sample_count"] < min_samples:
+            return (False, 0.0)
+
+        mean = baseline[f"{metric}_mean"]
+        m2 = baseline[f"{metric}_m2"]
+        n = baseline["sample_count"]
+
+        if n < 2:
+            return (False, 0.0)
+
+        variance = m2 / (n - 1)
+
+        import math
+
+        if variance <= 0 or m2 <= 0:
+            # Zero variance: all observations were identical.
+            # If value exceeds mean, treat as infinite z-score.
+            if value > mean:
+                return (True, float("inf"))
+            return (False, 0.0)
+
+        stddev = math.sqrt(variance)
+        z_score = (value - mean) / stddev
+
+        return (z_score > sigma, z_score)
+
+    def get_volume_first_observation(self, client: str) -> Optional[datetime]:
+        """Get when a device was first observed in volume baseline.
+
+        Used to determine if the device has passed the learning period.
+        """
+        result = self.conn.execute("""
+            SELECT MIN(last_updated) FROM volume_baseline
+            WHERE client = ?
+        """, [client]).fetchone()
+        return result[0] if result and result[0] else None
+
+    def insert_watchdog_observation(
+        self,
+        observation_id: str,
+        timestamp: datetime,
+        cycle_number: int,
+        snapshot_json: str,
+        concerns_json: str,
+        action_taken: str,
+        api_latency_ms: Optional[float] = None,
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+        estimated_cost_usd: Optional[float] = None,
+        model_used: Optional[str] = None,
+    ) -> None:
+        """Insert a watchdog observation audit record."""
+        self.conn.execute("""
+            INSERT INTO watchdog_observations (
+                id, timestamp, cycle_number, snapshot_json, concerns_json,
+                action_taken, api_latency_ms, input_tokens, output_tokens,
+                estimated_cost_usd, model_used
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            observation_id, timestamp, cycle_number, snapshot_json,
+            concerns_json, action_taken, api_latency_ms, input_tokens,
+            output_tokens, estimated_cost_usd, model_used,
+        ])
+
+    # =========================================================================
     # Data Retention / Cleanup Methods
     # =========================================================================
 
@@ -898,6 +1127,25 @@ class EventStore:
         """).fetchone()
         stats["device_activity_baseline"] = {
             "count": result[0] if result else 0,
+        }
+
+        # Volume baseline (bounded, no date range)
+        result = self.conn.execute("""
+            SELECT COUNT(*) FROM volume_baseline
+        """).fetchone()
+        stats["volume_baseline"] = {
+            "count": result[0] if result else 0,
+        }
+
+        # Watchdog observations
+        result = self.conn.execute("""
+            SELECT COUNT(*), MIN(timestamp), MAX(timestamp)
+            FROM watchdog_observations
+        """).fetchone()
+        stats["watchdog_observations"] = {
+            "count": result[0] if result else 0,
+            "oldest": result[1] if result else None,
+            "newest": result[2] if result else None,
         }
 
         return stats
