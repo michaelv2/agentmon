@@ -47,10 +47,25 @@ main {
 
 .status-bar {
     display: flex;
+    align-items: center;
     gap: 16px;
     margin-bottom: 20px;
     color: var(--text-muted);
     font-size: 13px;
+}
+
+.status-bar select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.status-bar label {
+    margin-left: auto;
 }
 
 .domain-table {

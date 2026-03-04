@@ -710,20 +710,52 @@ class EventStore:
     # Alert Review / Dashboard Methods
     # =========================================================================
 
-    def get_flagged_domains_summary(self, limit: int = 100) -> list[dict]:
+    def get_flagged_domains_summary(
+        self,
+        limit: int = 100,
+        min_severity: str | None = None,
+    ) -> list[dict]:
         """Get aggregated summary of flagged domains from alerts.
 
         Groups alerts by domain, returning alert counts, severity breakdown,
-        and which analyzers flagged each domain.
+        and which analyzers flagged each domain. Results are sorted by max
+        severity (highest first), then by alert count.
+
+        Args:
+            limit: Maximum number of domains to return.
+            min_severity: If set, only include alerts at or above this severity
+                (info, low, medium, high, critical).
 
         Returns:
-            List of dicts with domain, alert_count, severities, analyzers,
-            first_seen, last_seen, acknowledged_count, false_positive_count.
+            List of dicts with domain, alert_count, max_severity, severities,
+            analyzers, first_seen, last_seen, acknowledged_count,
+            false_positive_count.
         """
-        result = self.conn.execute("""
+        severity_order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+        where_clause = "WHERE domain IS NOT NULL AND domain != ''"
+        params: list[object] = []
+
+        if min_severity and min_severity in severity_order:
+            threshold = severity_order[min_severity]
+            allowed = [s for s, v in severity_order.items() if v >= threshold]
+            placeholders = ", ".join("?" for _ in allowed)
+            where_clause += f" AND severity IN ({placeholders})"
+            params.extend(allowed)
+
+        params.append(limit)
+
+        result = self.conn.execute(f"""
             SELECT
                 domain,
                 COUNT(*) as alert_count,
+                MAX(CASE severity
+                    WHEN 'critical' THEN 4
+                    WHEN 'high' THEN 3
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 1
+                    ELSE 0
+                END) as max_severity_rank,
                 LIST(DISTINCT severity) as severities,
                 LIST(DISTINCT analyzer) as analyzers,
                 MIN(timestamp) as first_seen,
@@ -731,17 +763,21 @@ class EventStore:
                 SUM(CASE WHEN acknowledged THEN 1 ELSE 0 END) as acknowledged_count,
                 SUM(CASE WHEN false_positive THEN 1 ELSE 0 END) as false_positive_count
             FROM alerts
-            WHERE domain IS NOT NULL AND domain != ''
+            {where_clause}
             GROUP BY domain
-            ORDER BY alert_count DESC
+            ORDER BY max_severity_rank DESC, alert_count DESC
             LIMIT ?
-        """, [limit]).fetchall()
+        """, params).fetchall()
 
+        rank_to_name = {4: "critical", 3: "high", 2: "medium", 1: "low", 0: "info"}
         columns = [
-            "domain", "alert_count", "severities", "analyzers",
+            "domain", "alert_count", "max_severity_rank", "severities", "analyzers",
             "first_seen", "last_seen", "acknowledged_count", "false_positive_count",
         ]
-        return [dict(zip(columns, row, strict=True)) for row in result]
+        rows = [dict(zip(columns, row, strict=True)) for row in result]
+        for row in rows:
+            row["max_severity"] = rank_to_name.get(row.pop("max_severity_rank"), "info")
+        return rows
 
     def get_domain_querying_clients(self, domain: str) -> list[dict]:
         """Get clients that queried a specific domain.

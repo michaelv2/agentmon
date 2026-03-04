@@ -15,6 +15,14 @@
     <main>
         <div class="status-bar">
             <span id="domainCount">Loading...</span>
+            <label for="severityFilter">Min severity:</label>
+            <select id="severityFilter" onchange="loadDomains()">
+                <option value="">All</option>
+                <option value="low">Low+</option>
+                <option value="medium">Medium+</option>
+                <option value="high">High+</option>
+                <option value="critical">Critical</option>
+            </select>
             <span id="lastRefresh"></span>
         </div>
 
@@ -96,7 +104,9 @@
 
     async function loadDomains() {
         try {
-            const data = await api('GET', '/api/flagged-domains');
+            const sev = document.getElementById('severityFilter').value;
+            const qs = sev ? `?min_severity=${sev}` : '';
+            const data = await api('GET', `/api/flagged-domains${qs}`);
             const tbody = document.getElementById('domainBody');
             const domains = data.domains || [];
 

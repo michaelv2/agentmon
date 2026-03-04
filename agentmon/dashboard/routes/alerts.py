@@ -52,11 +52,11 @@ async def index(request: Request) -> HTMLResponse:
 
 
 @router.get("/api/flagged-domains")
-async def flagged_domains(request: Request) -> JSONResponse:
-    """Get aggregated flagged domains."""
+async def flagged_domains(request: Request, min_severity: str | None = None) -> JSONResponse:
+    """Get aggregated flagged domains, sorted by severity then count."""
     store = _get_store(request)
     try:
-        domains = store.get_flagged_domains_summary(limit=100)
+        domains = store.get_flagged_domains_summary(limit=100, min_severity=min_severity)
         # Serialize datetimes
         for d in domains:
             for key in ("first_seen", "last_seen"):
