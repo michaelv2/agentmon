@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
+import dns.resolver
+import dns.reversename
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,8 +108,12 @@ class ClientResolver:
         self._failed_cache[ip] = datetime.now() + timedelta(seconds=self._negative_cache_ttl)
         return ip
 
-    def _reverse_lookup(self, ip: str) -> Optional[str]:
+    def _reverse_lookup(self, ip: str) -> str | None:
         """Perform PTR lookup for IP address.
+
+        When dns_server is configured, uses dnspython to query that server
+        directly. Otherwise falls back to socket.gethostbyaddr() which
+        respects /etc/resolv.conf and /etc/hosts.
 
         Args:
             ip: IP address to look up
@@ -114,29 +121,54 @@ class ClientResolver:
         Returns:
             Hostname if found, None otherwise
         """
+        if self.config.dns_server:
+            return self._reverse_lookup_dns(ip)
+        return self._reverse_lookup_socket(ip)
+
+    def _reverse_lookup_dns(self, ip: str) -> str | None:
+        """PTR lookup via dnspython against a specific DNS server."""
         try:
-            # Use gethostbyaddr for reverse DNS lookup
-            # This respects /etc/hosts and NSS configuration
+            resolver = dns.resolver.Resolver(configure=False)
+            resolver.nameservers = [self.config.dns_server]  # type: ignore[list-item]
+            resolver.lifetime = 5.0  # 5 second timeout
+
+            rev_name = dns.reversename.from_address(ip)
+            answers = resolver.resolve(rev_name, "PTR")
+            hostname = str(answers[0]).rstrip(".")
+
+            if self.config.strip_suffix:
+                hostname = hostname.split(".")[0]
+
+            return hostname
+
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            logger.debug("No PTR record for %s", ip)
+            return None
+        except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers) as e:
+            logger.debug("DNS lookup failed for %s: %s", ip, e)
+            return None
+        except Exception as e:
+            logger.warning("Unexpected error resolving %s: %s", ip, e)
+            return None
+
+    def _reverse_lookup_socket(self, ip: str) -> str | None:
+        """PTR lookup via socket.gethostbyaddr (uses system resolver)."""
+        try:
             hostname, _, _ = socket.gethostbyaddr(ip)
 
             if self.config.strip_suffix:
-                # "alice-laptop.lan" → "alice-laptop"
-                # "server.home.local" → "server"
-                hostname = hostname.split('.')[0]
+                hostname = hostname.split(".")[0]
 
             return hostname
 
         except socket.herror:
-            # No PTR record found - this is expected for many devices
-            logger.debug(f"No PTR record for {ip}")
+            logger.debug("No PTR record for %s", ip)
             return None
         except socket.gaierror as e:
-            # DNS resolution failed (network issue, invalid IP, etc.)
-            logger.debug(f"DNS lookup failed for {ip}: {e}")
+            logger.debug("DNS lookup failed for %s: %s", ip, e)
             return None
         except Exception as e:
-            # Unexpected error
-            logger.warning(f"Unexpected error resolving {ip}: {e}")
+            logger.warning("Unexpected error resolving %s: %s", ip, e)
             return None
 
     def clear_cache(self) -> None:

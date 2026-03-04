@@ -109,9 +109,18 @@ known_bad_patterns = [
     # "proxychain",
 ]
 
-# Domains to always ignore (exact match)
+# Domains to always ignore.
+# Supports exact match ("example.com") and wildcard suffix
+# ("*.example.com" matches all subdomains + the parent domain).
 allowlist = [
     "localhost",
+    "*.services.mozilla.com",
+    "*.data.microsoft.com",
+    "*.mozilla.org",
+    "*.apple-dns.net",
+    "*.steamserver.net",
+    "*.icloud.com",
+    "ctldl.windowsupdate.com",
     # Add trusted domains here
 ]
 

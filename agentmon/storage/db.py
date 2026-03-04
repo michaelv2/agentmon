@@ -324,6 +324,61 @@ class EventStore:
 
         return len(rows)
 
+    def insert_connection_event(self, event: ConnectionEvent) -> str:
+        """Insert a connection event and return its ID."""
+        event_id = str(uuid.uuid4())
+
+        self.conn.execute("""
+            INSERT INTO connection_events (
+                id, timestamp, client, src_port, dst_ip, dst_port,
+                protocol, bytes_sent, bytes_recv, duration_seconds, dns_domain
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            event_id,
+            event.timestamp,
+            event.client,
+            event.src_port,
+            event.dst_ip,
+            event.dst_port,
+            event.protocol,
+            event.bytes_sent,
+            event.bytes_recv,
+            event.duration_seconds,
+            event.dns_domain,
+        ])
+
+        return event_id
+
+    def insert_connection_events_batch(self, events: list[ConnectionEvent]) -> int:
+        """Insert multiple connection events efficiently. Returns count inserted."""
+        if not events:
+            return 0
+
+        rows = []
+        for event in events:
+            rows.append((
+                str(uuid.uuid4()),
+                event.timestamp,
+                event.client,
+                event.src_port,
+                event.dst_ip,
+                event.dst_port,
+                event.protocol,
+                event.bytes_sent,
+                event.bytes_recv,
+                event.duration_seconds,
+                event.dns_domain,
+            ))
+
+        self.conn.executemany("""
+            INSERT INTO connection_events (
+                id, timestamp, client, src_port, dst_ip, dst_port,
+                protocol, bytes_sent, bytes_recv, duration_seconds, dns_domain
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+
+        return len(rows)
+
     def insert_alert(self, alert: Alert) -> str:
         """Insert an alert and return its ID."""
         self.conn.execute("""
@@ -601,39 +656,156 @@ class EventStore:
         self,
         dns_events_days: int = 30,
         alerts_days: int = 90,
+        connection_events_days: int | None = None,
     ) -> dict[str, int]:
         """Delete data older than retention periods.
 
         Args:
             dns_events_days: Delete DNS events older than this many days
             alerts_days: Delete alerts older than this many days
+            connection_events_days: Delete connection events older than this many days
+                (defaults to dns_events_days if None)
 
         Returns:
             Dict with counts of deleted records
         """
+        conn_days = connection_events_days if connection_events_days is not None else dns_events_days
+
         dns_cutoff = datetime.now(timezone.utc) - timedelta(days=dns_events_days)
         alerts_cutoff = datetime.now(timezone.utc) - timedelta(days=alerts_days)
+        conn_cutoff = datetime.now(timezone.utc) - timedelta(days=conn_days)
 
-        # Delete old DNS events
-        dns_result = self.conn.execute("""
-            DELETE FROM dns_events WHERE timestamp < ?
-        """, [dns_cutoff])
-        dns_deleted = dns_result.rowcount
+        # DuckDB DELETE doesn't reliably return rowcount, so count first
+        dns_row = self.conn.execute(
+            "SELECT COUNT(*) FROM dns_events WHERE timestamp < ?", [dns_cutoff]
+        ).fetchone()
+        dns_deleted: int = dns_row[0] if dns_row else 0
+        self.conn.execute("DELETE FROM dns_events WHERE timestamp < ?", [dns_cutoff])
 
-        # Delete old alerts
-        alerts_result = self.conn.execute("""
-            DELETE FROM alerts WHERE timestamp < ?
-        """, [alerts_cutoff])
-        alerts_deleted = alerts_result.rowcount
+        alerts_row = self.conn.execute(
+            "SELECT COUNT(*) FROM alerts WHERE timestamp < ?", [alerts_cutoff]
+        ).fetchone()
+        alerts_deleted: int = alerts_row[0] if alerts_row else 0
+        self.conn.execute("DELETE FROM alerts WHERE timestamp < ?", [alerts_cutoff])
+
+        conn_row = self.conn.execute(
+            "SELECT COUNT(*) FROM connection_events WHERE timestamp < ?", [conn_cutoff]
+        ).fetchone()
+        conn_deleted: int = conn_row[0] if conn_row else 0
+        self.conn.execute(
+            "DELETE FROM connection_events WHERE timestamp < ?", [conn_cutoff]
+        )
 
         return {
             "dns_events_deleted": dns_deleted,
             "alerts_deleted": alerts_deleted,
+            "connection_events_deleted": conn_deleted,
         }
 
     def vacuum(self) -> None:
         """Reclaim disk space after deletions."""
         self.conn.execute("VACUUM")
+
+    # =========================================================================
+    # Alert Review / Dashboard Methods
+    # =========================================================================
+
+    def get_flagged_domains_summary(self, limit: int = 100) -> list[dict]:
+        """Get aggregated summary of flagged domains from alerts.
+
+        Groups alerts by domain, returning alert counts, severity breakdown,
+        and which analyzers flagged each domain.
+
+        Returns:
+            List of dicts with domain, alert_count, severities, analyzers,
+            first_seen, last_seen, acknowledged_count, false_positive_count.
+        """
+        result = self.conn.execute("""
+            SELECT
+                domain,
+                COUNT(*) as alert_count,
+                LIST(DISTINCT severity) as severities,
+                LIST(DISTINCT analyzer) as analyzers,
+                MIN(timestamp) as first_seen,
+                MAX(timestamp) as last_seen,
+                SUM(CASE WHEN acknowledged THEN 1 ELSE 0 END) as acknowledged_count,
+                SUM(CASE WHEN false_positive THEN 1 ELSE 0 END) as false_positive_count
+            FROM alerts
+            WHERE domain IS NOT NULL AND domain != ''
+            GROUP BY domain
+            ORDER BY alert_count DESC
+            LIMIT ?
+        """, [limit]).fetchall()
+
+        columns = [
+            "domain", "alert_count", "severities", "analyzers",
+            "first_seen", "last_seen", "acknowledged_count", "false_positive_count",
+        ]
+        return [dict(zip(columns, row, strict=True)) for row in result]
+
+    def get_domain_querying_clients(self, domain: str) -> list[dict]:
+        """Get clients that queried a specific domain.
+
+        Returns:
+            List of dicts with client, query_count, first_query, last_query.
+        """
+        result = self.conn.execute("""
+            SELECT
+                client,
+                COUNT(*) as query_count,
+                MIN(timestamp) as first_query,
+                MAX(timestamp) as last_query
+            FROM dns_events
+            WHERE domain = ?
+            GROUP BY client
+            ORDER BY query_count DESC
+        """, [domain]).fetchall()
+
+        columns = ["client", "query_count", "first_query", "last_query"]
+        return [dict(zip(columns, row, strict=True)) for row in result]
+
+    def acknowledge_domain_alerts(self, domain: str) -> int:
+        """Mark all alerts for a domain as acknowledged.
+
+        Returns:
+            Number of alerts updated.
+        """
+        count_row = self.conn.execute(
+            "SELECT COUNT(*) FROM alerts WHERE domain = ? AND acknowledged = FALSE",
+            [domain],
+        ).fetchone()
+        count: int = count_row[0] if count_row else 0
+
+        if count > 0:
+            self.conn.execute(
+                "UPDATE alerts SET acknowledged = TRUE WHERE domain = ? AND acknowledged = FALSE",
+                [domain],
+            )
+        return count
+
+    def mark_domain_false_positive(self, domain: str) -> int:
+        """Mark all alerts for a domain as false positives.
+
+        Returns:
+            Number of alerts updated.
+        """
+        count_row = self.conn.execute(
+            "SELECT COUNT(*) FROM alerts WHERE domain = ? AND false_positive = FALSE",
+            [domain],
+        ).fetchone()
+        count: int = count_row[0] if count_row else 0
+
+        if count > 0:
+            self.conn.execute(
+                "UPDATE alerts SET false_positive = TRUE "
+                "WHERE domain = ? AND false_positive = FALSE",
+                [domain],
+            )
+        return count
+
+    # =========================================================================
+    # Table Statistics
+    # =========================================================================
 
     def get_table_stats(self) -> dict[str, dict]:
         """Get row counts and date ranges for main tables.
@@ -660,6 +832,17 @@ class EventStore:
             FROM alerts
         """).fetchone()
         stats["alerts"] = {
+            "count": result[0] if result else 0,
+            "oldest": result[1] if result else None,
+            "newest": result[2] if result else None,
+        }
+
+        # Connection events
+        result = self.conn.execute("""
+            SELECT COUNT(*), MIN(timestamp), MAX(timestamp)
+            FROM connection_events
+        """).fetchone()
+        stats["connection_events"] = {
             "count": result[0] if result else 0,
             "oldest": result[1] if result else None,
             "newest": result[2] if result else None,

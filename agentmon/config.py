@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 ENV_SLACK_WEBHOOK = "AGENTMON_SLACK_WEBHOOK"
 ENV_OLLAMA_HOST = "OLLAMA_HOST"
 ENV_VIRUSTOTAL_API_KEY = "AGENTMON_VIRUSTOTAL_API_KEY"
+ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 
 
 def get_default_config_path() -> Path:
@@ -117,6 +118,13 @@ class Config:
     threat_feeds_cache_dir: Path = field(default_factory=lambda: Path.home() / ".cache" / "agentmon" / "feeds")
     threat_feeds_update_interval_hours: int = 24
     threat_feeds_severity: str = "high"
+
+    # Dashboard
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8080
+
+    # Anthropic (Claude) API
+    anthropic_api_key: Optional[str] = None
 
 
 def load_config(config_path: Optional[Path] = None) -> Config:
@@ -353,7 +361,91 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         if "alert_severity" in tf:
             config.threat_feeds_severity = tf["alert_severity"]
 
+    # Dashboard section
+    if "dashboard" in data:
+        dash = data["dashboard"]
+        if "host" in dash:
+            config.dashboard_host = dash["host"]
+        if "port" in dash:
+            config.dashboard_port = dash["port"]
+
+    # ANTHROPIC_API_KEY env var
+    env_anthropic_key = os.environ.get(ENV_ANTHROPIC_API_KEY)
+    if env_anthropic_key:
+        config.anthropic_api_key = env_anthropic_key
+        logger.info("Anthropic API key loaded from environment variable")
+
     return config
+
+
+def append_to_allowlist(domain: str, config_path: Optional[Path] = None) -> Path:
+    """Append a domain to the allowlist in the TOML config file.
+
+    Reads the existing config, adds the domain to [analyzer] allowlist,
+    and writes back atomically via temp file + rename.
+
+    Args:
+        domain: Domain to add to the allowlist.
+        config_path: Path to config file. If None, uses find_config_file().
+
+    Returns:
+        Path to the config file that was updated.
+
+    Raises:
+        FileNotFoundError: If no config file exists.
+        RuntimeError: If tomli_w is not installed.
+    """
+    if config_path is None:
+        config_path = find_config_file()
+    if config_path is None:
+        # Create default config path
+        config_path = get_default_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_bytes(b"")
+
+    try:
+        import tomli_w
+    except ImportError as e:
+        raise RuntimeError(
+            "tomli_w is required for allowlist persistence. "
+            "Install with: pip install tomli-w"
+        ) from e
+
+    # Read existing config
+    with open(config_path, "rb") as f:
+        data = tomli.load(f) if config_path.stat().st_size > 0 else {}
+
+    # Ensure [analyzer] section exists
+    if "analyzer" not in data:
+        data["analyzer"] = {}
+
+    # Ensure allowlist exists as a list
+    if "allowlist" not in data["analyzer"]:
+        data["analyzer"]["allowlist"] = []
+
+    # Add domain if not already present
+    if domain not in data["analyzer"]["allowlist"]:
+        data["analyzer"]["allowlist"].append(domain)
+
+    # Atomic write: temp file + rename
+    import tempfile
+    temp_fd, temp_path = tempfile.mkstemp(
+        dir=config_path.parent, suffix=".toml.tmp"
+    )
+    try:
+        with os.fdopen(temp_fd, "wb") as f:
+            tomli_w.dump(data, f)
+        os.replace(temp_path, config_path)
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+    logger.info(f"Added '{domain}' to allowlist in {config_path}")
+    return config_path
 
 
 def merge_cli_options(config: Config, **cli_options: Any) -> Config:

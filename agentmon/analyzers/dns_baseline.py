@@ -40,7 +40,8 @@ class AnalyzerConfig:
     # Known-bad domain patterns (substrings to match)
     known_bad_patterns: list[str] = field(default_factory=list)
 
-    # Known-good domains to ignore (exact match after lowercasing)
+    # Known-good domains to ignore. Supports exact match ("example.com")
+    # and wildcard suffix ("*.example.com" matches all subdomains + parent).
     allowlist: set[str] = field(default_factory=set)
 
     # Domain suffixes to always ignore (e.g., local domains)
@@ -238,8 +239,8 @@ class DNSBaselineAnalyzer:
             self.store.update_domain_baseline(event.client, domain_lower, event.timestamp)
             return []
 
-        # Check allowlist
-        if domain_lower in self.config.allowlist:
+        # Check allowlist (exact match or *.suffix wildcard)
+        if self._is_allowlisted(domain_lower):
             self.store.update_domain_baseline(event.client, domain_lower, event.timestamp)
             return []
 
@@ -296,6 +297,25 @@ class DNSBaselineAnalyzer:
         """Check if domain should be ignored based on suffix."""
         return any(domain.endswith(suffix) for suffix in self.config.ignore_suffixes)
 
+    def _is_allowlisted(self, domain: str) -> bool:
+        """Check if domain matches the allowlist.
+
+        Supports two formats:
+        - Exact match: "example.com" matches only "example.com"
+        - Wildcard suffix: "*.example.com" matches any subdomain
+          of example.com (e.g. "foo.example.com", "a.b.example.com")
+          as well as "example.com" itself.
+        """
+        for entry in self.config.allowlist:
+            if entry.startswith("*."):
+                suffix = entry[1:]  # ".example.com"
+                parent = entry[2:]  # "example.com"
+                if domain == parent or domain.endswith(suffix):
+                    return True
+            elif domain == entry:
+                return True
+        return False
+
     def _check_threat_feed(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
         """Check if domain is in external threat intelligence feeds."""
         if not self._threat_feed_manager:
@@ -323,20 +343,35 @@ class DNSBaselineAnalyzer:
 
     @staticmethod
     def _matches_at_label_boundary(domain: str, pattern: str) -> bool:
-        """Check if pattern appears at a domain label boundary.
+        """Check if pattern appears at domain label boundaries.
 
-        Matches when the pattern starts at position 0 or immediately after a
-        dot, preventing partial mid-label matches like 'c2-' inside 'ec2-'.
+        Start boundary: pattern must begin at position 0 or immediately after
+        a dot, preventing partial mid-label matches like 'c2-' inside 'ec2-'.
+
+        End boundary: patterns ending with an alphanumeric character (e.g.,
+        'beacon') also require the match to end at a label boundary (before a
+        dot or at end of string). This prevents 'beacon' from matching
+        'beacons2.gvt2.com'. Patterns ending with a non-alphanumeric character
+        (e.g., 'c2-') only require start boundary, acting as label prefixes.
         """
         d = domain.lower()
         p = pattern.lower()
+        if not p:
+            return False
+        require_end_boundary = p[-1].isalnum()
         idx = 0
         while True:
             idx = d.find(p, idx)
             if idx == -1:
                 return False
+            # Start boundary: at position 0 or after a dot
             if idx == 0 or d[idx - 1] == ".":
-                return True
+                if not require_end_boundary:
+                    return True
+                # End boundary: at end of string or before a dot
+                end_idx = idx + len(p)
+                if end_idx >= len(d) or d[end_idx] == ".":
+                    return True
             idx += 1
 
     def _check_known_bad(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:

@@ -1,8 +1,11 @@
-"""Tests for DNS baseline analyzer known-bad pattern matching."""
+"""Tests for DNS baseline analyzer pattern matching and allowlist."""
+
+from pathlib import Path
 
 import pytest
 
-from agentmon.analyzers.dns_baseline import DNSBaselineAnalyzer
+from agentmon.analyzers.dns_baseline import AnalyzerConfig, DNSBaselineAnalyzer
+from agentmon.storage import EventStore
 
 
 class TestMatchesAtLabelBoundary:
@@ -59,5 +62,76 @@ class TestMatchesAtLabelBoundary:
     def test_pattern_is_entire_label(self) -> None:
         assert DNSBaselineAnalyzer._matches_at_label_boundary("beacon.evil.com", "beacon")
 
+    def test_alphanumeric_pattern_requires_end_boundary(self) -> None:
+        """'beacon' should NOT match 'beacons2.gvt2.com' (Google telemetry)."""
+        assert not DNSBaselineAnalyzer._matches_at_label_boundary(
+            "beacons2.gvt2.com", "beacon"
+        )
+        assert not DNSBaselineAnalyzer._matches_at_label_boundary(
+            "beaconfire.example.com", "beacon"
+        )
+
+    def test_alphanumeric_pattern_matches_exact_label(self) -> None:
+        """'beacon' should still match when it IS the full label."""
+        assert DNSBaselineAnalyzer._matches_at_label_boundary("beacon.evil.com", "beacon")
+        assert DNSBaselineAnalyzer._matches_at_label_boundary("sub.beacon.evil.com", "beacon")
+        assert DNSBaselineAnalyzer._matches_at_label_boundary("beacon", "beacon")
+
+    def test_prefix_pattern_still_works(self) -> None:
+        """Patterns ending with '-' act as label prefixes (no end boundary)."""
+        assert DNSBaselineAnalyzer._matches_at_label_boundary("c2-server.evil.com", "c2-")
+        assert DNSBaselineAnalyzer._matches_at_label_boundary("rat-callback.evil.com", "rat-")
+
     def test_no_match_at_all(self) -> None:
         assert not DNSBaselineAnalyzer._matches_at_label_boundary("google.com", "c2-")
+
+
+class TestIsAllowlisted:
+    """Tests for allowlist matching with wildcard support."""
+
+    @pytest.fixture
+    def analyzer(self) -> DNSBaselineAnalyzer:
+        store = EventStore(Path(":memory:"))
+        store.connect()
+        config = AnalyzerConfig(
+            allowlist={
+                "localhost",
+                "exact.example.com",
+                "*.services.mozilla.com",
+                "*.icloud.com",
+            },
+        )
+        return DNSBaselineAnalyzer(store, config)
+
+    def test_exact_match(self, analyzer: DNSBaselineAnalyzer) -> None:
+        assert analyzer._is_allowlisted("localhost")
+        assert analyzer._is_allowlisted("exact.example.com")
+
+    def test_exact_no_match(self, analyzer: DNSBaselineAnalyzer) -> None:
+        assert not analyzer._is_allowlisted("other.example.com")
+
+    def test_wildcard_matches_subdomain(self, analyzer: DNSBaselineAnalyzer) -> None:
+        assert analyzer._is_allowlisted("push.services.mozilla.com")
+        assert analyzer._is_allowlisted("sync.services.mozilla.com")
+
+    def test_wildcard_matches_deep_subdomain(self, analyzer: DNSBaselineAnalyzer) -> None:
+        assert analyzer._is_allowlisted("a.b.services.mozilla.com")
+
+    def test_wildcard_matches_parent_domain(self, analyzer: DNSBaselineAnalyzer) -> None:
+        """*.icloud.com should also match icloud.com itself."""
+        assert analyzer._is_allowlisted("icloud.com")
+
+    def test_wildcard_no_partial_match(self, analyzer: DNSBaselineAnalyzer) -> None:
+        """*.icloud.com should NOT match fakeicloud.com."""
+        assert not analyzer._is_allowlisted("fakeicloud.com")
+        assert not analyzer._is_allowlisted("noticloud.com")
+
+    def test_wildcard_no_match_different_domain(self, analyzer: DNSBaselineAnalyzer) -> None:
+        assert not analyzer._is_allowlisted("services.mozilla.org")
+        assert not analyzer._is_allowlisted("evil.com")
+
+    def test_empty_allowlist(self) -> None:
+        store = EventStore(Path(":memory:"))
+        store.connect()
+        analyzer = DNSBaselineAnalyzer(store, AnalyzerConfig(allowlist=set()))
+        assert not analyzer._is_allowlisted("anything.com")

@@ -10,7 +10,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from agentmon.analyzers import DNSBaselineAnalyzer
+from agentmon.analyzers import ConnectionAnalyzer, ConnectionAnalyzerConfig, DNSBaselineAnalyzer
 from agentmon.analyzers.dns_baseline import AnalyzerConfig
 from agentmon.collectors import PiholeCollector
 from agentmon.collectors.pihole import PiholeConfig
@@ -526,6 +526,10 @@ def listen(
         )
         client_resolver = ClientResolver(resolver_config)
 
+    # Initialize connection analyzer
+    conn_analyzer_config = ConnectionAnalyzerConfig(learning_mode=use_learning)
+    connection_analyzer = ConnectionAnalyzer(store, conn_analyzer_config)
+
     def handle_message(msg: SyslogMessage) -> None:
         """Process a received syslog message."""
         stats["messages_received"] += 1
@@ -549,6 +553,13 @@ def listen(
                     console.print(f"[yellow]  -> blocked: {dns_event.domain}[/yellow]")
                 return
 
+            # Early filtering: skip domains matching ignore_suffixes before
+            # storage and resolution to avoid database bloat from noisy queries
+            # (e.g., DNS-SD .arpa floods)
+            domain_lower = dns_event.domain.lower()
+            if any(domain_lower.endswith(suffix) for suffix in cfg.ignore_suffixes):
+                return
+
             # Resolve client IP to hostname (if resolver is enabled)
             # This allows baselines to survive DHCP changes
             if client_resolver:
@@ -568,6 +579,9 @@ def listen(
 
             stats["dns_events"] += 1
             store.insert_dns_event(dns_event)
+
+            # Feed DNS event to connection analyzer for correlation
+            connection_analyzer.track_dns_answer(dns_event)
 
             # Analyze for threats (security)
             alerts = analyzer.analyze_event(dns_event)
@@ -604,13 +618,55 @@ def listen(
                     asyncio.get_event_loop().create_task(slack_notifier.send_alert(alert))
 
         if conn_event:
+            # Resolve client IP to hostname (if resolver is enabled)
+            if client_resolver:
+                original_client = conn_event.client
+                resolved_client = client_resolver.resolve(conn_event.client)
+                if resolved_client != original_client:
+                    conn_event = type(conn_event)(
+                        timestamp=conn_event.timestamp,
+                        client=resolved_client,
+                        src_port=conn_event.src_port,
+                        dst_ip=conn_event.dst_ip,
+                        dst_port=conn_event.dst_port,
+                        protocol=conn_event.protocol,
+                        bytes_sent=conn_event.bytes_sent,
+                        bytes_recv=conn_event.bytes_recv,
+                        duration_seconds=conn_event.duration_seconds,
+                        dns_domain=conn_event.dns_domain,
+                    )
+
             stats["connection_events"] += 1
-            # Connection events storage not yet implemented
+
+            # Correlate with DNS and detect direct IP access
+            conn_event, conn_alerts = connection_analyzer.analyze_event(conn_event)
+            store.insert_connection_event(conn_event)
+
             if verbose:
+                domain_str = f" ({conn_event.dns_domain})" if conn_event.dns_domain else ""
                 console.print(
                     f"[dim]Connection:[/dim] {conn_event.client}:{conn_event.src_port} -> "
-                    f"{conn_event.dst_ip}:{conn_event.dst_port} ({conn_event.protocol})"
+                    f"{conn_event.dst_ip}:{conn_event.dst_port} ({conn_event.protocol}){domain_str}"
                 )
+
+            for alert in conn_alerts:
+                stats["alerts"] += 1
+                store.insert_alert(alert)
+                severity_color = {
+                    Severity.INFO: "dim",
+                    Severity.LOW: "blue",
+                    Severity.MEDIUM: "yellow",
+                    Severity.HIGH: "red",
+                    Severity.CRITICAL: "red bold",
+                }.get(alert.severity, "white")
+                console.print(
+                    f"[{severity_color}][ALERT][/{severity_color}] "
+                    f"{alert.title}"
+                )
+
+                # Send to Slack (fire-and-forget, don't block)
+                if slack_notifier:
+                    asyncio.get_event_loop().create_task(slack_notifier.send_alert(alert))
 
     def print_stats() -> None:
         """Print final statistics."""
@@ -715,7 +771,7 @@ def listen(
 
         try:
             await receiver.run_forever()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, KeyboardInterrupt):
             pass
         finally:
             if cleanup_task:
@@ -792,6 +848,125 @@ def feeds(ctx: click.Context) -> None:
         console.print("[yellow]No feeds cached yet[/yellow]")
 
     console.print(f"\n[dim]Cache directory: {cfg.threat_feeds_cache_dir}[/dim]")
+
+
+@main.command()
+@click.option("--host", type=str, default=None, help="Host to bind to (default: 127.0.0.1)")
+@click.option("--port", type=int, default=None, help="Port to listen on (default: 8080)")
+@click.pass_context
+def dashboard(ctx: click.Context, host: str | None, port: int | None) -> None:
+    """Start the alert review dashboard.
+
+    Opens a web UI for triaging flagged domains, marking false positives,
+    adding to allowlist, and sending domains to Claude for analysis.
+
+    Note: The dashboard needs read-write database access. Stop 'agentmon listen'
+    before starting the dashboard to avoid lock conflicts.
+
+    Example:
+        agentmon dashboard --port 8080
+    """
+    cfg = ctx.obj["config"]
+
+    dash_host = host if host is not None else cfg.dashboard_host
+    dash_port = port if port is not None else cfg.dashboard_port
+
+    try:
+        import uvicorn
+        from agentmon.dashboard.app import create_app
+    except ImportError:
+        console.print("[red]Dashboard dependencies not installed.[/red]")
+        console.print("Install with: [cyan]pip install -e '.[dev]'[/cyan]")
+        console.print("Required: fastapi, uvicorn, jinja2")
+        sys.exit(1)
+
+    app = create_app(cfg)
+
+    console.print(f"[green]Starting dashboard at http://{dash_host}:{dash_port}[/green]")
+    if cfg.anthropic_api_key:
+        console.print("[dim]Anthropic (Claude) LLM review: enabled[/dim]")
+    else:
+        console.print("[dim]Anthropic LLM review: disabled (set ANTHROPIC_API_KEY)[/dim]")
+    console.print("[dim]Press Ctrl+C to stop[/dim]")
+    console.print()
+
+    uvicorn.run(app, host=dash_host, port=dash_port, log_level="info")
+
+
+@main.command()
+@click.option("--days", type=int, default=7, help="Days to look back (default: 7)")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format (default: text)",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write output to file instead of stdout",
+)
+@click.pass_context
+def reassess(
+    ctx: click.Context,
+    days: int,
+    output_format: str,
+    output_path: Path | None,
+) -> None:
+    """Analyze alert patterns and suggest rule improvements.
+
+    Reviews recent alerts to identify false positive noise, blind spots,
+    and rule tuning opportunities. Optionally uses Claude Sonnet for
+    deeper analysis when ANTHROPIC_API_KEY is set.
+
+    Examples:
+        agentmon reassess --days 7
+        agentmon reassess --format json --output report.json
+    """
+    cfg = ctx.obj["config"]
+    db_path: Path = ctx.obj["db_path"]
+
+    # Initialize Anthropic client if available
+    anthropic_client = None
+    if cfg.anthropic_api_key:
+        try:
+            from agentmon.llm.anthropic_client import AnthropicClient
+
+            anthropic_client = AnthropicClient(cfg.anthropic_api_key)
+            if not anthropic_client.available:
+                anthropic_client = None
+        except Exception:
+            pass
+
+    from agentmon.reassess.analyzer import ReassessmentAnalyzer
+
+    with EventStore(db_path, read_only=True) as store:
+        analyzer = ReassessmentAnalyzer(store, anthropic_client)
+
+        if anthropic_client:
+            console.print("[dim]Using Claude Sonnet for analysis...[/dim]")
+        else:
+            console.print("[dim]Heuristic analysis only (set ANTHROPIC_API_KEY for LLM)[/dim]")
+
+        report = analyzer.analyze(days=days)
+
+    # Output
+    if output_format == "json":
+        output_text = report.to_json()
+    else:
+        output_text = report.to_text()
+
+    if output_path:
+        output_path.write_text(output_text)
+        console.print(f"[green]Report written to {output_path}[/green]")
+    else:
+        if output_format == "json":
+            console.print(output_text)
+        else:
+            console.print(output_text, highlight=False)
 
 
 if __name__ == "__main__":
