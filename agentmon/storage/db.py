@@ -7,7 +7,10 @@ DuckDB is chosen for:
 - Single-file database (simple deployment)
 """
 
+import contextlib
+import os
 import shutil
+import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,20 +52,32 @@ class EventStore:
             except duckdb.IOException:
                 # Database is locked by writer, copy to temp file
                 # Must copy both .db and .wal files for complete data
-                import os
                 temp_dir = tempfile.mkdtemp(prefix="agentmon_")
                 self._temp_db_path = Path(temp_dir) / "events.db"
                 shutil.copy2(self.db_path, self._temp_db_path)
+                # Secure temp copy permissions
+                self._set_secure_permissions(self._temp_db_path)
                 # Also copy WAL file if it exists
                 wal_path = Path(str(self.db_path) + ".wal")
                 if wal_path.exists():
-                    shutil.copy2(wal_path, Path(temp_dir) / "events.db.wal")
+                    temp_wal = Path(temp_dir) / "events.db.wal"
+                    shutil.copy2(wal_path, temp_wal)
+                    self._set_secure_permissions(temp_wal)
                 self._conn = duckdb.connect(str(self._temp_db_path), read_only=True)
         else:
             self._conn = duckdb.connect(db_str, read_only=self.read_only)
 
         if not self.read_only:
             self._ensure_schema()
+            # Secure the database file after creation
+            if self.db_path != Path(":memory:") and self.db_path.exists():
+                self._set_secure_permissions(self.db_path)
+
+    @staticmethod
+    def _set_secure_permissions(path: Path) -> None:
+        """Set file permissions to owner-only (0o600)."""
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
     def close(self) -> None:
         """Close database connection."""

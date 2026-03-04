@@ -94,7 +94,8 @@ class PiholeCollector:
             raise ValueError("ssh_host must be set for remote collection")
 
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
         connect_kwargs: dict[str, object] = {
             "hostname": self.config.ssh_host,

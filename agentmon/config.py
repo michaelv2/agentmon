@@ -4,6 +4,7 @@ Loads settings from TOML config file with CLI override support.
 """
 
 import fcntl
+import hashlib
 import logging
 import os
 from dataclasses import dataclass, field
@@ -70,6 +71,7 @@ class Config:
         ".local", ".lan", ".home", ".internal", ".localdomain", ".arpa"
     ])
     alert_dedup_window: int = 600  # 10 minutes
+    alert_dedup_cache_size: int = 5000
 
     # LLM (two-tier)
     llm_enabled: bool = False
@@ -150,6 +152,30 @@ class Config:
     anthropic_api_key: Optional[str] = None
 
 
+def _verify_config_integrity(config_path: Path, raw_bytes: bytes) -> None:
+    """Check config file against optional SHA256 sidecar file.
+
+    If a ``<config_path>.sha256`` sidecar exists, compare its content
+    (hex digest) against the actual file hash.  A mismatch logs a warning
+    but does **not** prevent loading (defense-in-depth, not a hard gate).
+    """
+    sidecar = config_path.with_suffix(".toml.sha256")
+    if not sidecar.exists():
+        return
+
+    expected = sidecar.read_text().strip().lower()
+    actual = hashlib.sha256(raw_bytes).hexdigest().lower()
+    if actual != expected:
+        logger.warning(
+            "Config integrity checksum mismatch for %s — "
+            "expected %s, got %s. The config file may have been modified "
+            "outside normal tooling.",
+            config_path,
+            expected[:16] + "…",
+            actual[:16] + "…",
+        )
+
+
 def load_config(config_path: Optional[Path] = None) -> Config:
     """Load configuration from TOML file.
 
@@ -172,8 +198,10 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     logger.info(f"Loading config from {config_path}")
 
     try:
-        with open(config_path, "rb") as f:
-            data = tomli.load(f)
+        raw_bytes = config_path.read_bytes()
+        _verify_config_integrity(config_path, raw_bytes)
+        import io
+        data = tomli.load(io.BytesIO(raw_bytes))
     except Exception as e:
         logger.warning(f"Failed to load config file: {e}")
         return config
@@ -213,6 +241,8 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.ignore_suffixes = analyzer["ignore_suffixes"]
         if "alert_dedup_window" in analyzer:
             config.alert_dedup_window = analyzer["alert_dedup_window"]
+        if "alert_dedup_cache_size" in analyzer:
+            config.alert_dedup_cache_size = analyzer["alert_dedup_cache_size"]
 
     # LLM section
     if "llm" in data:

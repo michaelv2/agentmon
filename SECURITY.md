@@ -40,6 +40,11 @@ Last audit: 2026-03-04
 | HIGH | ReDoS in syslog parser | Added MAX_SYSLOG_MESSAGE_LENGTH (8KB) limit |
 | MEDIUM | Slack webhook URL logging risk | Truncate error response body to 200 chars before logging |
 | LOW | LLM response validation | Clamp confidence to [0,1], validate category enum, sanitize inputs |
+| LOW | No rate limiting on syslog | Per-IP token bucket rate limiting via `rate_limit_per_second` config |
+| LOW | Paramiko AutoAddPolicy | Use `RejectPolicy` + `load_system_host_keys()` |
+| LOW | No config file integrity check | Optional SHA256 checksum verification via `.toml.sha256` sidecar |
+| LOW | Unbounded alert dedup cache | Configurable `alert_dedup_cache_size` in config (default 5000) |
+| LOW | Missing database file permissions | Set 0o600 on DB files after creation and on temp copies |
 
 ### Known Issues (TODO)
 
@@ -107,57 +112,6 @@ os.chmod(self._temp_db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 **Mitigation:**
 - Use VPN/WireGuard between devices (recommended)
 - Implement RFC 5425 TLS syslog (future enhancement)
-
-#### LOW: No Rate Limiting on Syslog
-
-**Location:** `agentmon/collectors/syslog_receiver.py`
-
-**Risk:** Flood of messages can exhaust CPU, memory, or disk.
-
-**Mitigation:** Implement per-IP token bucket rate limiting.
-
-#### LOW: Paramiko AutoAddPolicy
-
-**Location:** `agentmon/collectors/pihole.py:96`
-
-**Risk:** SSH client trusts unknown host keys, enabling MITM attacks.
-
-**Mitigation:** Use `RejectPolicy` and require hosts in `~/.ssh/known_hosts`.
-
-#### LOW: No Config File Integrity Check
-
-**Location:** `agentmon/config.py`
-
-**Risk:** Config modifications go undetected.
-
-**Mitigation:** Optional SHA256 checksum verification via `.toml.sha256` sidecar file.
-
-#### LOW: Unbounded Alert Deduplication Cache
-
-**Location:** `agentmon/analyzers/dns_baseline.py:79-82`
-
-**Risk:** The alert deduplication cache uses a fixed size (5000 entries). In high-traffic environments with many unique domain/client combinations, the cache could evict entries prematurely, causing duplicate alerts, or consume excessive memory if misconfigured.
-
-**Mitigation:** Make cache size configurable and add monitoring:
-```toml
-[analyzer]
-alert_dedup_cache_size = 10000  # Adjust based on network size
-```
-
-#### LOW: Missing Database File Permissions
-
-**Location:** `agentmon/storage/db.py:40-42`
-
-**Risk:** The EventStore doesn't verify or set secure permissions on the DuckDB database file after creation. On shared systems, other users might read DNS query history which reveals browsing habits and network topology.
-
-**Mitigation:**
-```python
-import os
-import stat
-
-if self.db_path.exists():
-    os.chmod(self.db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-```
 
 ## Deployment Hardening
 

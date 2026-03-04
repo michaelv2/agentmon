@@ -65,6 +65,7 @@ class AnalyzerConfig:
 
     # Alert deduplication: suppress repeated alerts for same (domain, client, type)
     alert_dedup_window: int = DEFAULT_DEDUP_WINDOW  # seconds
+    alert_dedup_cache_size: int = DEFAULT_DEDUP_CACHE_SIZE
 
 
 class DNSBaselineAnalyzer:
@@ -86,7 +87,7 @@ class DNSBaselineAnalyzer:
 
         # Alert deduplication cache: (domain, client, alert_type) -> True
         self._alert_cache: TTLCache[str, bool] = TTLCache(
-            maxsize=DEFAULT_DEDUP_CACHE_SIZE,
+            maxsize=self.config.alert_dedup_cache_size,
             ttl=self.config.alert_dedup_window,
         )
         self._dedup_hits = 0

@@ -15,6 +15,7 @@ import asyncio
 import logging
 import re
 import signal
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -91,6 +92,7 @@ class SyslogConfig:
     allowed_ips: list[str] = field(default_factory=list)  # Empty = allow all
     year: int = field(default_factory=lambda: datetime.now().year)
     buffer_size: int = 65535  # Max UDP packet size
+    rate_limit_per_second: int = 0  # 0 = disabled; per-IP token bucket
 
 
 # Maximum syslog message size to prevent ReDoS attacks
@@ -204,6 +206,37 @@ def parse_syslog_message(
     )
 
 
+class _PerIPRateLimiter:
+    """Simple per-IP token bucket rate limiter.
+
+    Each IP gets `rate` tokens per second; a message consumes one token.
+    When tokens are exhausted, messages are silently dropped.
+    """
+
+    def __init__(self, rate: int) -> None:
+        self.rate = rate  # tokens per second; 0 means disabled
+        self._buckets: dict[str, tuple[float, float]] = {}  # ip -> (tokens, last_ts)
+
+    def allow(self, ip: str) -> bool:
+        """Return True if the message from *ip* should be processed."""
+        if self.rate <= 0:
+            return True
+
+        now = time.monotonic()
+        tokens, last_ts = self._buckets.get(ip, (float(self.rate), now))
+
+        # Refill tokens based on elapsed time
+        elapsed = now - last_ts
+        tokens = min(float(self.rate), tokens + elapsed * self.rate)
+
+        if tokens >= 1.0:
+            self._buckets[ip] = (tokens - 1.0, now)
+            return True
+
+        self._buckets[ip] = (tokens, now)
+        return False
+
+
 # Type alias for message handler callback
 MessageHandler = Callable[[SyslogMessage], None]
 
@@ -219,6 +252,7 @@ class UDPSyslogProtocol(asyncio.DatagramProtocol):
         self.handler = handler
         self.config = config
         self.transport: asyncio.DatagramTransport | None = None
+        self._rate_limiter = _PerIPRateLimiter(config.rate_limit_per_second)
 
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:  # type: ignore[override]
         self.transport = transport
@@ -229,6 +263,11 @@ class UDPSyslogProtocol(asyncio.DatagramProtocol):
         # Check IP allowlist
         if self.config.allowed_ips and source_ip not in self.config.allowed_ips:
             logger.debug(f"Rejected syslog from {source_ip} (not in allowlist)")
+            return
+
+        # Per-IP rate limiting
+        if not self._rate_limiter.allow(source_ip):
+            logger.debug(f"Rate limited syslog from {source_ip}")
             return
 
         msg = parse_syslog_message(data, source_ip, self.config.year)
@@ -252,6 +291,7 @@ class TCPSyslogProtocol(asyncio.Protocol):
         self.transport: asyncio.Transport | None = None
         self.buffer = b""
         self.peer: tuple[str, int] | None = None
+        self._rate_limiter = _PerIPRateLimiter(config.rate_limit_per_second)
 
     def connection_made(self, transport: asyncio.Transport) -> None:  # type: ignore[override]
         self.transport = transport
@@ -285,6 +325,10 @@ class TCPSyslogProtocol(asyncio.Protocol):
             line, self.buffer = self.buffer.split(b"\n", 1)
             if line:
                 source_ip = self.peer[0] if self.peer else "unknown"
+                # Per-IP rate limiting
+                if not self._rate_limiter.allow(source_ip):
+                    logger.debug(f"Rate limited TCP syslog from {source_ip}")
+                    continue
                 msg = parse_syslog_message(line, source_ip, self.config.year)
                 if msg:
                     try:
