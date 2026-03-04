@@ -24,7 +24,7 @@ Agentmon is a network monitoring tool that:
 
 ## Security Audit Status
 
-Last audit: 2026-01-28
+Last audit: 2026-03-04
 
 ### Fixed Issues
 
@@ -38,6 +38,8 @@ Last audit: 2026-01-28
 | HIGH | No warning when binding to 0.0.0.0 | Added runtime security warning in CLI |
 | HIGH | Slack webhook in plaintext config | Support AGENTMON_SLACK_WEBHOOK env var override |
 | HIGH | ReDoS in syslog parser | Added MAX_SYSLOG_MESSAGE_LENGTH (8KB) limit |
+| MEDIUM | Slack webhook URL logging risk | Truncate error response body to 200 chars before logging |
+| LOW | LLM response validation | Clamp confidence to [0,1], validate category enum, sanitize inputs |
 
 ### Known Issues (TODO)
 
@@ -96,20 +98,6 @@ import stat
 os.chmod(self._temp_db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 ```
 
-#### MEDIUM: Slack Webhook URL Logging Risk
-
-**Location:** `agentmon/notifiers/slack.py:112-126`
-
-**Risk:** Error handling logs response text and error messages. If the Slack API returns the webhook URL in an error message (e.g., 404), it could be logged and exposed to users with log access.
-
-**Mitigation:**
-```python
-# Sanitize response to avoid leaking webhook URL
-import re
-safe_response = re.sub(r'https?://[^\s]+', '[URL_REDACTED]', resp.text[:200])
-logger.warning(f"Slack webhook failed: {resp.status_code} - {safe_response}")
-```
-
 #### MEDIUM: Missing TLS for Syslog
 
 **Location:** `agentmon/collectors/syslog_receiver.py`
@@ -155,17 +143,6 @@ logger.warning(f"Slack webhook failed: {resp.status_code} - {safe_response}")
 [analyzer]
 alert_dedup_cache_size = 10000  # Adjust based on network size
 ```
-
-#### LOW: LLM Response Validation
-
-**Location:** `agentmon/llm/classifier.py:345-369`
-
-**Risk:** The `_parse_response` method doesn't strictly validate the JSON schema from LLM responses. Malformed responses could cause unexpected behavior or invalid classification results.
-
-**Mitigation:**
-- Validate confidence is in range [0, 1] and clamp if out of range
-- Limit reasoning field length (e.g., max 1000 chars)
-- Validate category is a known enum value
 
 #### LOW: Missing Database File Permissions
 
