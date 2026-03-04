@@ -76,44 +76,39 @@
 
 ---
 
-## Priority 3 — Minor (fix when convenient)
+## Priority 3 — Minor (DONE)
 
-### 10. Fix category classifier substring false positives
+### 10. ~~Fix category classifier substring false positives~~ ✅
 - **File**: `agentmon/policies/category_classifier.py`
-- **Issue**: Simple substring matching causes `"riot"` to match `"patriot-act.gov"`, `"signal"` to match `"signalprocessing.edu"`, `"x.com"` to match `"relax.com"`.
-- **Fix**: Use domain-label boundary matching (similar to `_matches_at_label_boundary` in dns_baseline) or match against registered domain only.
-- [ ] Switch to label-boundary or exact-domain matching
-- [ ] Add tests for false positive cases
+- **Implemented**: Replaced naive substring matching with `_matches_domain()` that checks at domain label boundaries (exact, suffix, prefix, infix). `"riot"` no longer matches `"patriot-act.gov"`, etc. 13 new tests in `test_category_classifier.py`.
+- [x] Switch to label-boundary or exact-domain matching
+- [x] Add tests for false positive cases
 
-### 11. Standardize on UTC-aware datetimes
-- **Files**: `agentmon/analyzers/device_activity.py` (lines 262, 287), `agentmon/resolver.py` (lines 82-108)
-- **Issue**: These modules use `datetime.now()` (naive) while the rest of the system uses UTC-aware datetimes. Can cause off-by-hours in alerts and inconsistent cache behavior during DST transitions.
-- [ ] Replace `datetime.now()` with `datetime.now(timezone.utc)` in affected modules
+### 11. ~~Standardize on UTC-aware datetimes~~ ✅
+- **Files**: `agentmon/analyzers/device_activity.py`, `agentmon/resolver.py`
+- **Implemented**: Replaced all `datetime.now()` with `datetime.now(UTC)` in both modules. Cache expiry comparisons and alert timestamps are now UTC-aware. 3 new tests in `test_resolver.py`.
+- [x] Replace `datetime.now()` with `datetime.now(UTC)` in affected modules
 
-### 12. Truncate Slack error response body before logging
-- **File**: `agentmon/notifiers/slack.py` (line 118)
-- **Issue**: `resp.text` may contain the webhook URL itself in error responses. Webhook URLs are functionally credentials.
-- **Fix**: Truncate to first 200 chars.
-- [ ] Truncate response body in warning log
+### 12. ~~Truncate Slack error response body before logging~~ ✅
+- **File**: `agentmon/notifiers/slack.py`
+- **Implemented**: Truncated `resp.text` to first 200 chars in the warning log message. 1 new async test in `test_slack.py`.
+- [x] Truncate response body in warning log
 
-### 13. Compute `year` at parse time, not config creation time
-- **File**: `agentmon/collectors/syslog_receiver.py` (line 92)
-- **Issue**: `SyslogConfig.year` is set at object creation. A process running across New Year's will assign the wrong year to all subsequent RFC 3164 messages.
-- **Fix**: Use `datetime.now().year` at parse time in `parse_syslog_message()`.
-- [ ] Move year computation to parse time
+### 13. ~~Compute `year` at parse time, not config creation time~~ ✅
+- **File**: `agentmon/collectors/syslog_receiver.py`
+- **Implemented**: Changed `parse_syslog_message()` default `year` param from `datetime.now().year` (evaluated once at module load) to `None`, with `year = datetime.now().year` computed at call time. 2 new tests in `test_syslog.py`.
+- [x] Move year computation to parse time
 
-### 14. Add Slack notification path for watchdog-generated alerts
-- **File**: `agentmon/watchdog/ooda.py` (line 427)
-- **Issue**: Watchdog creates Alert records in DB but does not trigger Slack. Alerts only appear in dashboard/CLI queries.
-- **Fix**: Pass the `SlackNotifier` to the watchdog (or emit alerts through a shared notification bus) so watchdog alerts trigger Slack.
-- [ ] Wire SlackNotifier into watchdog
-- [ ] Test that watchdog alerts produce Slack messages
+### 14. ~~Add Slack notification path for watchdog-generated alerts~~ ✅
+- **File**: `agentmon/watchdog/ooda.py`
+- **Implemented**: Added `slack_notifier` attribute to `OODAWatchdog`. In `_act()`, after inserting an alert, calls `slack_notifier.queue_alert(alert)` if notifier is set. Gracefully handles missing notifier and exceptions. 3 new tests in `test_watchdog.py`.
+- [x] Wire SlackNotifier into watchdog
+- [x] Test that watchdog alerts produce Slack messages
 
-### 15. Validate threat feed content before overwriting cache
-- **File**: `agentmon/threat_feeds.py` (lines 116-133)
-- **Issue**: A 200 response with empty/garbage body overwrites the active cache file, wiping the feed until the next successful update.
-- **Fix**: Parse the downloaded content first. Only overwrite if the new set has a minimum number of entries (or at least is non-empty when the previous cache was non-empty).
-- [ ] Add content validation before cache overwrite
+### 15. ~~Validate threat feed content before overwriting cache~~ ✅
+- **File**: `agentmon/threat_feeds.py`
+- **Implemented**: `_download_feed()` now writes to temp file and parses domains. If existing cache has domains but new response yields zero valid domains, the update is rejected and logged. First-time downloads (no existing cache) are unaffected. 4 new tests in `test_threat_feeds.py`.
+- [x] Add content validation before cache overwrite
 
 ---
 

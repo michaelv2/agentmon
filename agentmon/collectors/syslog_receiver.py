@@ -105,7 +105,7 @@ MAX_TCP_BUFFER_SIZE = 65536
 def parse_syslog_message(
     data: bytes,
     source_ip: str,
-    year: int = datetime.now().year,
+    year: int | None = None,
 ) -> SyslogMessage | None:
     """Parse a raw syslog message.
 
@@ -121,6 +121,9 @@ def parse_syslog_message(
         Enforces maximum message length to prevent ReDoS attacks via
         crafted messages that cause catastrophic regex backtracking.
     """
+    if year is None:
+        year = datetime.now().year
+
     # Security: Enforce maximum message size to prevent ReDoS
     if len(data) > MAX_SYSLOG_MESSAGE_LENGTH:
         logger.warning(

@@ -13,10 +13,10 @@ Example use case:
     Alert: "Unusual activity detected outside normal hours"
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime
 import logging
 import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from agentmon.models import Alert, DNSEvent, Severity
 from agentmon.storage import EventStore
@@ -114,8 +114,7 @@ class DeviceActivityAnalyzer:
 
         # Make first_seen offset-aware if needed
         if first_seen.tzinfo is None:
-            from datetime import timezone
-            first_seen = first_seen.replace(tzinfo=timezone.utc)
+            first_seen = first_seen.replace(tzinfo=UTC)
 
         now = datetime.now(first_seen.tzinfo)
         days_observed = (now - first_seen).days
@@ -261,7 +260,7 @@ class DeviceActivityAnalyzer:
 
         return Alert(
             id=str(uuid.uuid4()),
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             severity=self.config.alert_severity,
             title=title,
             description=description,
@@ -284,7 +283,7 @@ class DeviceActivityAnalyzer:
             return []
 
         # Record partial hour data without alerting
-        now = datetime.now()
+        now = datetime.now(UTC)
         for client, count in self._hourly_counts.items():
             if self._is_always_active(client):
                 continue

@@ -631,3 +631,97 @@ class TestTuneActionQueuing:
         assert len(rows) == 1
         assert rows[0]["tune_action"] == "add_allowlist"
         assert rows[0]["tune_value"] == "*.netflix.com"
+
+
+# =========================================================================
+# Watchdog Slack Notification Tests
+# =========================================================================
+
+
+class TestWatchdogSlackNotification:
+    """Tests for Slack notification integration with watchdog alerts."""
+
+    def test_watchdog_calls_slack_on_alert_concern(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """Watchdog should notify Slack when creating alerts."""
+        from unittest.mock import AsyncMock
+
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Suspicious",
+            "concerns": [{
+                "title": "Malware domain",
+                "description": "Detected malware domain",
+                "severity": "high",
+                "confidence": 0.9,
+                "recommended_action": "alert",
+                "affected_clients": ["192.168.1.101"],
+                "affected_domains": ["malware.bad"],
+            }],
+        }))
+
+        mock_notifier = MagicMock()
+        watchdog = OODAWatchdog(
+            populated_store, mock_llm, interval_minutes=5,
+        )
+        watchdog.slack_notifier = mock_notifier
+
+        report = watchdog.run_cycle()
+
+        # Slack notifier should be called with the alert
+        assert mock_notifier.queue_alert.called
+        alert_arg = mock_notifier.queue_alert.call_args[0][0]
+        assert "[Watchdog]" in alert_arg.title
+        assert alert_arg.severity.value == "high"
+
+    def test_watchdog_no_slack_on_monitor_concern(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """Watchdog should NOT notify Slack for 'monitor' concerns."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Normal",
+            "concerns": [{
+                "title": "Minor note",
+                "description": "Just watching",
+                "severity": "info",
+                "confidence": 0.3,
+                "recommended_action": "monitor",
+                "affected_clients": [],
+                "affected_domains": [],
+            }],
+        }))
+
+        mock_notifier = MagicMock()
+        watchdog = OODAWatchdog(
+            populated_store, mock_llm, interval_minutes=5,
+        )
+        watchdog.slack_notifier = mock_notifier
+
+        report = watchdog.run_cycle()
+
+        mock_notifier.queue_alert.assert_not_called()
+
+    def test_watchdog_works_without_slack_notifier(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """Watchdog should work fine when no Slack notifier is configured."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Suspicious",
+            "concerns": [{
+                "title": "Alert",
+                "description": "Test",
+                "severity": "high",
+                "confidence": 0.9,
+                "recommended_action": "alert",
+                "affected_clients": ["192.168.1.101"],
+                "affected_domains": ["malware.bad"],
+            }],
+        }))
+
+        watchdog = OODAWatchdog(
+            populated_store, mock_llm, interval_minutes=5,
+        )
+        # No slack_notifier set — should not raise
+        report = watchdog.run_cycle()
+
+        assert "alert" in report.action_taken

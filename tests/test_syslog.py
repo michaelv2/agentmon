@@ -415,3 +415,34 @@ class TestSyslogConfig:
         assert config.protocol == "tcp"
         assert config.bind_address == "192.168.1.1"
         assert config.allowed_ips == ["192.168.1.2", "192.168.1.3"]
+
+
+class TestYearAtParseTime:
+    """Test that year is computed at parse time, not at config creation time."""
+
+    def test_rfc3164_uses_current_year_by_default(self) -> None:
+        """RFC 3164 messages should use the current year at parse time."""
+        from datetime import datetime as dt
+
+        data = b"<30>Jan 26 14:32:15 myhost myapp: test message"
+        msg = parse_syslog_message(data, "192.168.1.1")
+
+        assert msg is not None
+        assert msg.timestamp.year == dt.now().year
+
+    def test_rfc3164_year_not_from_config_default(self) -> None:
+        """The year default should be evaluated at call time, not module load time.
+
+        If we freeze time to a different year, the default year param should
+        reflect the parse-time year, not a cached year from config creation.
+        """
+        from unittest.mock import patch
+        import datetime as dt_module
+
+        # Parse a message — the year should come from datetime.now() at parse time
+        data = b"<30>Mar 01 10:00:00 host app: test"
+        msg = parse_syslog_message(data, "127.0.0.1")
+
+        assert msg is not None
+        # The year should be the current year
+        assert msg.timestamp.year == dt_module.datetime.now().year

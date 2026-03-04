@@ -12,8 +12,7 @@ Fallback chain:
 import logging
 import socket
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 import dns.resolver
 import dns.reversename
@@ -30,7 +29,7 @@ class ResolverConfig:
 
     # DNS server for reverse lookups (usually Pi-hole or local router)
     # If None, uses system default resolver
-    dns_server: Optional[str] = None
+    dns_server: str | None = None
 
     # Cache TTL for resolved hostnames (seconds)
     cache_ttl: int = 3600  # 1 hour
@@ -80,7 +79,7 @@ class ClientResolver:
         # 2. Check positive cache
         if ip in self._cache:
             hostname, expires = self._cache[ip]
-            if datetime.now() < expires:
+            if datetime.now(UTC) < expires:
                 return hostname
             else:
                 # Cache expired, remove it
@@ -89,7 +88,7 @@ class ClientResolver:
         # 3. Check negative cache (avoid hammering DNS for unknown IPs)
         if ip in self._failed_cache:
             failed_until = self._failed_cache[ip]
-            if datetime.now() < failed_until:
+            if datetime.now(UTC) < failed_until:
                 return ip  # Still in negative cache, return IP
             else:
                 # Negative cache expired, allow retry
@@ -99,13 +98,13 @@ class ClientResolver:
         hostname = self._reverse_lookup(ip)
         if hostname:
             # Cache successful lookups
-            expires = datetime.now() + timedelta(seconds=self.config.cache_ttl)
+            expires = datetime.now(UTC) + timedelta(seconds=self.config.cache_ttl)
             self._cache[ip] = (hostname, expires)
             logger.debug(f"Resolved {ip} → {hostname}")
             return hostname
 
         # 5. Cache failed lookup and fallback to IP
-        self._failed_cache[ip] = datetime.now() + timedelta(seconds=self._negative_cache_ttl)
+        self._failed_cache[ip] = datetime.now(UTC) + timedelta(seconds=self._negative_cache_ttl)
         return ip
 
     def _reverse_lookup(self, ip: str) -> str | None:
@@ -183,7 +182,7 @@ class ClientResolver:
         Returns:
             Dict with cache size and hit rate information
         """
-        now = datetime.now()
+        now = datetime.now(UTC)
 
         # Count valid entries
         valid_positive = sum(1 for _, (_, exp) in self._cache.items() if exp > now)
@@ -204,6 +203,6 @@ class ClientResolver:
         """
         self.config.mappings[ip] = hostname
         # Also add to positive cache
-        expires = datetime.now() + timedelta(seconds=self.config.cache_ttl)
+        expires = datetime.now(UTC) + timedelta(seconds=self.config.cache_ttl)
         self._cache[ip] = (hostname, expires)
         logger.debug(f"Added explicit mapping: {ip} → {hostname}")

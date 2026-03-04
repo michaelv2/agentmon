@@ -115,7 +115,7 @@ class SlackNotifier:
                 logger.debug(f"Slack notification sent for alert: {alert.title}")
                 return True
             else:
-                logger.warning(f"Slack webhook failed: {resp.status_code} - {resp.text}")
+                logger.warning(f"Slack webhook failed: {resp.status_code} - {resp.text[:200]}")
                 return False
 
         except httpx.TimeoutException:

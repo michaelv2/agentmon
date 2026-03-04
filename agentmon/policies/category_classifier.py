@@ -142,8 +142,32 @@ CATEGORY_PATTERNS: dict[str, list[str]] = {
 }
 
 
+def _matches_domain(domain: str, pattern: str) -> bool:
+    """Check if pattern matches at domain label boundaries.
+
+    Prevents false positives like 'riot' matching 'patriot-act.gov'.
+    Pattern must appear as a full label or set of labels, matching:
+    - Exact domain: pattern == domain
+    - Suffix match: domain ends with '.pattern'
+    - Prefix match: domain starts with 'pattern.'
+    - Infix match: '.pattern.' appears in domain
+
+    Patterns containing '.' (like 'x.com') require exact or suffix match
+    to prevent 'relax.com' matching 'x.com'.
+    """
+    if domain == pattern:
+        return True
+    if domain.endswith("." + pattern):
+        return True
+    if domain.startswith(pattern + "."):
+        return True
+    return ("." + pattern + ".") in domain
+
+
 def classify_domain(domain: str) -> str:
     """Classify a domain into a category based on pattern matching.
+
+    Uses domain-label boundary matching to prevent false positives.
 
     Args:
         domain: The domain name to classify (e.g., "www.youtube.com")
@@ -155,7 +179,7 @@ def classify_domain(domain: str) -> str:
 
     for category, patterns in CATEGORY_PATTERNS.items():
         for pattern in patterns:
-            if pattern in domain_lower:
+            if _matches_domain(domain_lower, pattern):
                 return category
 
     return "unknown"

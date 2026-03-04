@@ -8,7 +8,6 @@ import logging
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import requests
 
@@ -35,7 +34,7 @@ class ThreatFeedManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.update_interval = timedelta(hours=update_interval_hours)
         self.timeout = timeout_seconds
-        self._domains: Optional[set[str]] = None
+        self._domains: set[str] | None = None
 
     def get_malicious_domains(self) -> set[str]:
         """Get the current set of malicious domains.
@@ -116,6 +115,10 @@ class ThreatFeedManager:
     def _download_feed(self, url: str, cache_file: Path) -> None:
         """Download a threat feed and save to cache.
 
+        Validates content before overwriting: if the existing cache has
+        domains but the new response yields none, the download is rejected
+        to prevent wiping the active feed with empty/garbage data.
+
         Args:
             url: Feed URL
             cache_file: Path to save the downloaded feed
@@ -126,7 +129,29 @@ class ThreatFeedManager:
         resp = requests.get(url, timeout=self.timeout)
         resp.raise_for_status()
 
-        # Write to temp file first, then rename (atomic)
+        # Validate content before overwriting an existing cache
+        if cache_file.exists():
+            existing_domains = self._load_cache(cache_file)
+            if existing_domains:
+                # Write new content to temp file and validate
+                temp_file = cache_file.with_suffix(".tmp")
+                temp_file.write_text(resp.text)
+                new_domains = self._load_cache(temp_file)
+                if not new_domains:
+                    temp_file.unlink()
+                    logger.warning(
+                        f"Rejecting empty/garbage feed update for {cache_file.name}: "
+                        f"new response has 0 domains but cache has {len(existing_domains)}"
+                    )
+                    return
+                temp_file.replace(cache_file)
+                logger.info(
+                    f"Downloaded {cache_file.name} "
+                    f"({len(resp.text)} bytes, {len(new_domains)} domains)"
+                )
+                return
+
+        # No existing cache or it was empty — write directly
         temp_file = cache_file.with_suffix(".tmp")
         temp_file.write_text(resp.text)
         temp_file.replace(cache_file)
@@ -162,7 +187,7 @@ class ThreatFeedManager:
 
         return domains
 
-    def _extract_domain(self, line: str) -> Optional[str]:
+    def _extract_domain(self, line: str) -> str | None:
         """Extract domain from a feed line.
 
         Handles various formats:
@@ -196,7 +221,7 @@ class ThreatFeedManager:
 
         return domain
 
-    def check_domain(self, domain: str) -> Optional[str]:
+    def check_domain(self, domain: str) -> str | None:
         """Check if a domain is in the threat feeds.
 
         Args:

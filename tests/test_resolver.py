@@ -1,11 +1,10 @@
 """Tests for client identity resolution."""
 
 import socket
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import dns.resolver
-import pytest
 
 from agentmon.resolver import ClientResolver, ResolverConfig
 
@@ -213,7 +212,7 @@ class TestCache:
             resolver.resolve("192.168.1.99")
 
         # Expire the negative cache
-        resolver._failed_cache["192.168.1.99"] = datetime.now() - timedelta(seconds=1)
+        resolver._failed_cache["192.168.1.99"] = datetime.now(UTC) - timedelta(seconds=1)
 
         with patch("agentmon.resolver.socket.gethostbyaddr") as mock_gethostbyaddr:
             mock_gethostbyaddr.side_effect = socket.herror("No PTR record")
@@ -256,3 +255,44 @@ class TestCacheStats:
         assert stats["positive_entries"] == 1
         assert stats["negative_entries"] == 1
         assert stats["explicit_mappings"] == 1
+
+
+class TestUTCDatetimes:
+    """Test that resolver uses UTC-aware datetimes internally."""
+
+    def test_positive_cache_uses_utc(self) -> None:
+        """Positive cache expiry timestamps should be UTC-aware."""
+        config = ResolverConfig(enabled=True, dns_server=None)
+        resolver = ClientResolver(config)
+
+        with patch("agentmon.resolver.socket.gethostbyaddr") as mock:
+            mock.return_value = ("host.lan", [], ["192.168.1.70"])
+            resolver.resolve("192.168.1.70")
+
+        _, expires = resolver._cache["192.168.1.70"]
+        assert expires.tzinfo is not None
+
+    def test_negative_cache_uses_utc(self) -> None:
+        """Negative cache expiry timestamps should be UTC-aware."""
+        config = ResolverConfig(enabled=True, dns_server=None)
+        resolver = ClientResolver(config)
+
+        with patch("agentmon.resolver.socket.gethostbyaddr") as mock:
+            mock.side_effect = socket.herror("No PTR record")
+            resolver.resolve("192.168.1.99")
+
+        failed_until = resolver._failed_cache["192.168.1.99"]
+        assert failed_until.tzinfo is not None
+
+    def test_cache_stats_uses_utc(self) -> None:
+        """get_cache_stats should compare with UTC-aware datetimes."""
+        config = ResolverConfig(enabled=True, dns_server=None)
+        resolver = ClientResolver(config)
+
+        with patch("agentmon.resolver.socket.gethostbyaddr") as mock:
+            mock.return_value = ("host.lan", [], ["192.168.1.70"])
+            resolver.resolve("192.168.1.70")
+
+        # Should not raise on comparison with UTC-aware datetime
+        stats = resolver.get_cache_stats()
+        assert stats["positive_entries"] == 1

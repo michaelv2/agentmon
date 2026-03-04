@@ -109,6 +109,7 @@ class OODAWatchdog:
         self.max_tokens_per_cycle = max_tokens_per_cycle
         self.window_minutes = window_minutes or (interval_minutes * 2)
         self.config_path = config_path
+        self.slack_notifier: Optional[object] = None  # SlackNotifier, if wired
 
         self._cycle_number = 0
         self._metrics = SelfAwarenessMetrics()
@@ -434,6 +435,11 @@ class OODAWatchdog:
                     tags=[concern.recommended_action],
                 )
                 self.store.insert_alert(alert)
+                if self.slack_notifier is not None:
+                    try:
+                        self.slack_notifier.queue_alert(alert)  # type: ignore[union-attr]
+                    except Exception as e:
+                        logger.warning("Failed to queue Slack notification: %s", e)
                 actions.append(f"{concern.recommended_action}:{concern.title}")
                 logger.info(
                     f"Watchdog alert: [{concern.severity}] {concern.title} "
