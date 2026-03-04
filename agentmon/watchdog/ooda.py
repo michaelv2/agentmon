@@ -248,27 +248,88 @@ class OODAWatchdog:
 
     @staticmethod
     def _extract_json(raw: str) -> str:
-        """Extract JSON from LLM response, handling code fences and quirks."""
+        """Extract clean JSON from an LLM response.
+
+        Handles code fences, // and /* */ comments, trailing commas,
+        and text outside the JSON object — all in a single pass that
+        tracks whether we're inside a quoted string.
+        """
         text = raw.strip()
-        # Strip markdown code fences — find the actual JSON between them
+        # Strip markdown code fences
         if text.startswith("```"):
             lines = text.split("\n")
-            # Find opening and closing fence indices
-            start = 1  # skip first line (```json or ```)
+            start = 1
             end = len(lines) - 1
             for i in range(len(lines) - 1, 0, -1):
                 if lines[i].strip().startswith("```"):
                     end = i
                     break
             text = "\n".join(lines[start:end])
-        # Remove trailing commas before } or ] (common LLM mistake)
-        text = re.sub(r",\s*([}\]])", r"\1", text)
-        # Remove // line comments outside of strings.  We strip only
-        # comments that appear *after* JSON values (not inside strings)
-        # by targeting lines where // follows a closing quote, number,
-        # bracket, or brace.
-        text = re.sub(r'([\]}"0-9])\s*//[^\n]*', r"\1", text)
-        return text
+
+        # Single-pass cleanup: strip comments and track braces to
+        # isolate the outermost JSON object.
+        out: list[str] = []
+        i = 0
+        in_string = False
+        brace_depth = 0
+        json_start = -1
+
+        while i < len(text):
+            ch = text[i]
+
+            # Inside a JSON string — pass through, handling escapes
+            if in_string:
+                if ch == "\\" and i + 1 < len(text):
+                    out.append(text[i : i + 2])
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = False
+                out.append(ch)
+                i += 1
+                continue
+
+            # Outside a string — handle comments
+            if ch == "/" and i + 1 < len(text):
+                nxt = text[i + 1]
+                if nxt == "/":
+                    # Skip to end of line
+                    nl = text.find("\n", i)
+                    i = nl if nl != -1 else len(text)
+                    continue
+                if nxt == "*":
+                    # Skip to closing */
+                    close = text.find("*/", i + 2)
+                    i = close + 2 if close != -1 else len(text)
+                    continue
+
+            # Track object boundaries
+            if ch == "{":
+                if json_start == -1:
+                    json_start = len(out)
+                brace_depth += 1
+            elif ch == "}":
+                brace_depth -= 1
+
+            if ch == '"':
+                in_string = True
+
+            out.append(ch)
+
+            # Stop after the outermost object closes — ignore trailing text
+            if brace_depth == 0 and json_start != -1 and ch == "}":
+                break
+
+            i += 1
+
+        result = "".join(out)
+        # Trim any leading text before the JSON object
+        if json_start > 0:
+            result = result[json_start:]
+
+        # Remove trailing commas before } or ]
+        result = re.sub(r",\s*([}\]])", r"\1", result)
+        return result
 
     def _parse_concerns(self, raw_response: str) -> list[OODAConcern]:
         """Parse LLM JSON response into OODAConcern objects."""
@@ -304,8 +365,17 @@ class OODAWatchdog:
             return concerns
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            snippet = raw_response[:500] if raw_response else "<empty>"
-            logger.warning("Failed to parse watchdog LLM response: %s\n--- snippet ---\n%s", e, snippet)
+            # Log both the raw response (truncated) and the cleaned text
+            # around the error position for debugging.
+            snippet = raw_response[:2000] if raw_response else "<empty>"
+            err_ctx = ""
+            if isinstance(e, json.JSONDecodeError):
+                pos = e.pos or 0
+                err_ctx = f"\n--- around error (pos {pos}) ---\n{text[max(0, pos - 80):pos + 80]}"
+            logger.warning(
+                "Failed to parse watchdog LLM response: %s\n--- raw (first 2000) ---\n%s%s",
+                e, snippet, err_ctx,
+            )
             return []
 
     def _act(self, concerns: list[OODAConcern]) -> str:

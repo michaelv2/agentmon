@@ -159,8 +159,10 @@ def looks_like_dga(domain: str) -> tuple[bool, list[str]]:
     if has_excessive_consonants(domain):
         reasons.append("unusual consonant ratio")
 
-    # Long random-looking strings
-    if len(check_part) > 20 and re.search(r"[a-z0-9]{15,}", check_part):
+    # Long random-looking strings — require the sequence itself to have
+    # high entropy so compound words like "googleusercontent" don't match.
+    match = re.search(r"[a-z0-9]{15,}", check_part)
+    if len(check_part) > 20 and match and calculate_entropy(match.group()) > 3.5:
         reasons.append("long alphanumeric sequence")
 
     # Digit/letter mixing patterns common in DGA
