@@ -263,6 +263,11 @@ class OODAWatchdog:
             text = "\n".join(lines[start:end])
         # Remove trailing commas before } or ] (common LLM mistake)
         text = re.sub(r",\s*([}\]])", r"\1", text)
+        # Remove // line comments outside of strings.  We strip only
+        # comments that appear *after* JSON values (not inside strings)
+        # by targeting lines where // follows a closing quote, number,
+        # bracket, or brace.
+        text = re.sub(r'([\]}"0-9])\s*//[^\n]*', r"\1", text)
         return text
 
     def _parse_concerns(self, raw_response: str) -> list[OODAConcern]:
@@ -299,7 +304,8 @@ class OODAWatchdog:
             return concerns
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.warning(f"Failed to parse watchdog LLM response: {e}")
+            snippet = raw_response[:500] if raw_response else "<empty>"
+            logger.warning("Failed to parse watchdog LLM response: %s\n--- snippet ---\n%s", e, snippet)
             return []
 
     def _act(self, concerns: list[OODAConcern]) -> str:
