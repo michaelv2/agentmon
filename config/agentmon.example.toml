@@ -449,6 +449,13 @@ sustained_severity = "high"     # Multi-hour sustained elevation
 # 5 domains repeatedly every 30 seconds (C2 beaconing pattern) — something
 # that wouldn't trigger rate spike or diversity alerts individually.
 
+[dashboard]
+# API token for authenticating POST requests (state-mutating actions).
+# When set, all POST endpoints require Authorization: Bearer <token> header.
+# GET endpoints remain open (the HTML dashboard is always accessible).
+# SECURITY: Prefer environment variable: export AGENTMON_DASHBOARD_TOKEN="your-token"
+# api_token = "your-secret-token-here"
+
 [watchdog]
 enabled = false
 

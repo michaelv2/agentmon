@@ -2,16 +2,39 @@
 
 import asyncio
 import logging
+import os
+import secrets
+import signal
 from functools import partial
 
 import duckdb
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Security
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from agentmon.config import append_to_allowlist, find_config_file
+from agentmon.config import append_to_allowlist, find_config_file, update_tunable_field
+from agentmon.llm.classifier import sanitize_domain_for_prompt
 from agentmon.storage import EventStore
 
 logger = logging.getLogger(__name__)
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def require_auth(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> None:
+    """Dependency that enforces Bearer token auth on POST routes.
+
+    If no token is configured, auth is disabled (backwards compatible).
+    """
+    token = request.app.state.config.dashboard_api_token
+    if not token:
+        return  # No token configured = auth disabled
+    if not credentials or not secrets.compare_digest(credentials.credentials, token):
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+
 
 router = APIRouter()
 
@@ -82,7 +105,7 @@ async def domain_clients(request: Request, domain: str) -> JSONResponse:
         store.close()
 
 
-@router.post("/api/domain/{domain:path}/acknowledge")
+@router.post("/api/domain/{domain:path}/acknowledge", dependencies=[Depends(require_auth)])
 async def acknowledge_domain(request: Request, domain: str) -> JSONResponse:
     """Acknowledge all alerts for a domain."""
     store = _get_store(request)
@@ -93,7 +116,7 @@ async def acknowledge_domain(request: Request, domain: str) -> JSONResponse:
         store.close()
 
 
-@router.post("/api/domain/{domain:path}/false-positive")
+@router.post("/api/domain/{domain:path}/false-positive", dependencies=[Depends(require_auth)])
 async def false_positive_domain(request: Request, domain: str) -> JSONResponse:
     """Mark all alerts for a domain as false positives."""
     store = _get_store(request)
@@ -104,7 +127,7 @@ async def false_positive_domain(request: Request, domain: str) -> JSONResponse:
         store.close()
 
 
-@router.post("/api/domain/{domain:path}/allowlist")
+@router.post("/api/domain/{domain:path}/allowlist", dependencies=[Depends(require_auth)])
 async def allowlist_domain(request: Request, domain: str) -> JSONResponse:
     """Add a domain to the allowlist in TOML config and in-memory."""
     config = request.app.state.config
@@ -137,7 +160,7 @@ async def allowlist_domain(request: Request, domain: str) -> JSONResponse:
     })
 
 
-@router.post("/api/domain/{domain:path}/llm-review")
+@router.post("/api/domain/{domain:path}/llm-review", dependencies=[Depends(require_auth)])
 async def llm_review_domain(request: Request, domain: str) -> JSONResponse:
     """Send domain to Claude Sonnet for analysis."""
     anthropic_client = request.app.state.anthropic_client
@@ -157,6 +180,9 @@ async def llm_review_domain(request: Request, domain: str) -> JSONResponse:
     finally:
         store.close()
 
+    # Sanitize domain before prompt construction to prevent injection
+    safe_domain = sanitize_domain_for_prompt(domain)
+
     # Build user message with context
     client_lines = "\n".join(
         f"  - {c['client']}: {c['query_count']} queries"
@@ -164,7 +190,7 @@ async def llm_review_domain(request: Request, domain: str) -> JSONResponse:
     ) if clients else "  No query data available"
 
     user_message = (
-        f"Domain: {domain}\n\n"
+        f"Domain: {safe_domain}\n\n"
         f"Clients querying this domain:\n{client_lines}\n\n"
         f"This domain was flagged by the agentmon DNS monitoring system. "
         f"Please analyze it."
@@ -181,3 +207,66 @@ async def llm_review_domain(request: Request, domain: str) -> JSONResponse:
         raise HTTPException(status_code=502, detail="LLM analysis returned no response")
 
     return JSONResponse(content={"domain": domain, "analysis": response})
+
+
+@router.get("/api/pending-tunes")
+async def list_pending_tunes(request: Request) -> JSONResponse:
+    """List pending tune actions awaiting approval."""
+    store = _get_store(request)
+    try:
+        tunes = store.get_pending_tunes(status="pending")
+        # Serialize datetimes
+        for t in tunes:
+            for key in ("timestamp", "reviewed_at", "created_at"):
+                if t.get(key) is not None:
+                    t[key] = str(t[key])
+        return JSONResponse(content={"pending_tunes": tunes})
+    finally:
+        store.close()
+
+
+@router.post("/api/pending-tunes/{tune_id}/approve", dependencies=[Depends(require_auth)])
+async def approve_pending_tune(request: Request, tune_id: str) -> JSONResponse:
+    """Approve a pending tune action and apply the config change."""
+    store = _get_store(request)
+    try:
+        tunes = store.get_pending_tunes(status="pending")
+        tune = next((t for t in tunes if t["id"] == tune_id), None)
+        if not tune:
+            raise HTTPException(status_code=404, detail="Pending tune action not found")
+
+        # Apply the config change
+        config_path = getattr(request.app.state, "config_path", None)
+        try:
+            update_tunable_field(
+                tune["tune_action"],
+                tune["tune_value"],
+                config_path=config_path,
+            )
+        except (RuntimeError, ValueError, OSError) as e:
+            raise HTTPException(status_code=500, detail=f"Failed to apply tune: {e}")
+
+        store.update_pending_tune_status(tune_id, "approved")
+
+        # Send SIGHUP for config reload
+        try:
+            os.kill(os.getpid(), signal.SIGHUP)
+        except OSError:
+            pass
+
+        return JSONResponse(content={"id": tune_id, "status": "approved"})
+    finally:
+        store.close()
+
+
+@router.post("/api/pending-tunes/{tune_id}/reject", dependencies=[Depends(require_auth)])
+async def reject_pending_tune(request: Request, tune_id: str) -> JSONResponse:
+    """Reject a pending tune action."""
+    store = _get_store(request)
+    try:
+        success = store.update_pending_tune_status(tune_id, "rejected")
+        if not success:
+            raise HTTPException(status_code=404, detail="Pending tune action not found")
+        return JSONResponse(content={"id": tune_id, "status": "rejected"})
+    finally:
+        store.close()

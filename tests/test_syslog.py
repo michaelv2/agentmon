@@ -325,6 +325,73 @@ class TestRouteMessage:
         assert conn_event is None
 
 
+class TestTCPBufferOverflow:
+    """Tests for TCP buffer size limit (prevents OOM from malicious senders)."""
+
+    def test_buffer_overflow_closes_connection(self) -> None:
+        """Sending data without newlines exceeding MAX_TCP_BUFFER_SIZE closes the connection."""
+        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
+        from unittest.mock import MagicMock
+
+        handler = MagicMock()
+        config = SyslogConfig(protocol="tcp")
+        protocol = TCPSyslogProtocol(handler, config)
+
+        # Simulate connection
+        transport = MagicMock()
+        transport.get_extra_info.return_value = ("192.168.1.100", 12345)
+        protocol.connection_made(transport)
+
+        # Send data exceeding the buffer limit without any newlines
+        chunk = b"A" * (MAX_TCP_BUFFER_SIZE + 1)
+        protocol.data_received(chunk)
+
+        # Transport should be closed
+        transport.close.assert_called_once()
+        # Handler should never have been called (no complete message)
+        handler.assert_not_called()
+
+    def test_normal_messages_under_limit_work(self) -> None:
+        """Normal messages under the buffer limit are processed correctly."""
+        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
+        from unittest.mock import MagicMock
+
+        handler = MagicMock()
+        config = SyslogConfig(protocol="tcp")
+        protocol = TCPSyslogProtocol(handler, config)
+
+        transport = MagicMock()
+        transport.get_extra_info.return_value = ("192.168.1.100", 12345)
+        protocol.connection_made(transport)
+
+        # Send a valid syslog message with newline
+        msg = b"<30>Jan 26 14:32:15 myhost myapp: test message\n"
+        protocol.data_received(msg)
+
+        # Handler should be called with the parsed message
+        handler.assert_called_once()
+        transport.close.assert_not_called()
+
+    def test_buffer_resets_after_overflow(self) -> None:
+        """Buffer is reset after overflow so no stale data remains."""
+        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
+        from unittest.mock import MagicMock
+
+        handler = MagicMock()
+        config = SyslogConfig(protocol="tcp")
+        protocol = TCPSyslogProtocol(handler, config)
+
+        transport = MagicMock()
+        transport.get_extra_info.return_value = ("192.168.1.100", 12345)
+        protocol.connection_made(transport)
+
+        # Trigger overflow
+        protocol.data_received(b"A" * (MAX_TCP_BUFFER_SIZE + 1))
+
+        # Buffer should be empty after overflow
+        assert protocol.buffer == b""
+
+
 class TestSyslogConfig:
     """Tests for syslog configuration."""
 

@@ -12,17 +12,14 @@ self-awareness of its own operational footprint.
 import asyncio
 import json
 import logging
-import os
 import re
-import signal
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from agentmon.config import update_tunable_field
-from agentmon.llm.anthropic_client import AnthropicClient
+from agentmon.llm.anthropic_client import AnthropicClient, CompletionResult
 from agentmon.models import Alert, Severity
 from agentmon.storage import EventStore
 from agentmon.watchdog.models import (
@@ -92,7 +89,7 @@ class OODAWatchdog:
         store: EventStore,
         llm: AnthropicClient,
         interval_minutes: int = 15,
-        max_tokens_per_cycle: int = 1024,
+        max_tokens_per_cycle: int = 4096,
         window_minutes: Optional[int] = None,
         config_path: Optional[Path] = None,
     ) -> None:
@@ -193,7 +190,7 @@ class OODAWatchdog:
         user_message = self._build_user_message(snapshot)
 
         start = time.monotonic()
-        result = self.llm.complete_with_usage(SYSTEM_PROMPT, user_message)
+        result = self._call_llm(user_message)
         latency_ms = (time.monotonic() - start) * 1000
 
         if result is None:
@@ -214,10 +211,30 @@ class OODAWatchdog:
         self._last_output_tokens = output_tokens
         self._last_cost = cost
 
+        # Detect truncated responses before attempting to parse
+        if result.stop_reason == "max_tokens":
+            logger.warning(
+                "Watchdog cycle %d: response truncated at %d output tokens "
+                "(max_tokens_per_cycle=%d). Increase [watchdog] "
+                "max_tokens_per_cycle in config.",
+                self._cycle_number,
+                output_tokens,
+                self.max_tokens_per_cycle,
+            )
+            return [], raw_response, latency_ms
+
         # Parse concerns from JSON response
         concerns = self._parse_concerns(raw_response)
 
         return concerns, raw_response, latency_ms
+
+    def _call_llm(
+        self, user_message: str
+    ) -> CompletionResult | None:
+        """Call the LLM synchronously. Wrapped by run_periodic via executor."""
+        return self.llm.complete_with_usage(
+            SYSTEM_PROMPT, user_message, max_tokens=self.max_tokens_per_cycle
+        )
 
     def _build_user_message(self, snapshot: OODASnapshot) -> str:
         """Build the user message for the LLM with snapshot and metrics."""
@@ -349,11 +366,13 @@ class OODAWatchdog:
                     )
                     severity = "medium"
 
+                confidence = max(0.0, min(1.0, float(item.get("confidence", 0.5))))
+
                 concern = OODAConcern(
                     title=item.get("title", "Unknown"),
                     description=item.get("description", ""),
                     severity=severity,
-                    confidence=float(item.get("confidence", 0.5)),
+                    confidence=confidence,
                     recommended_action=item.get("recommended_action", "monitor"),
                     affected_clients=item.get("affected_clients", []),
                     affected_domains=item.get("affected_domains", []),
@@ -378,8 +397,13 @@ class OODAWatchdog:
             )
             return []
 
+    # DNS charset: alphanumeric, hyphen, dot, underscore, wildcard prefix
+    _DNS_CHARSET = re.compile(r'^[\w.*-]+$', re.ASCII)
+    _MAX_ALLOWLIST_LEN = 253
+    _MAX_KNOWN_BAD_LEN = 500
+
     def _act(self, concerns: list[OODAConcern]) -> str:
-        """Act phase: create alerts for actionable concerns and apply tune actions.
+        """Act phase: create alerts for actionable concerns and queue tune actions.
 
         Returns:
             Summary of actions taken.
@@ -426,8 +450,33 @@ class OODAWatchdog:
             return "no_action"
         return "; ".join(actions)
 
+    def _validate_tune_value(self, tune_action: str, tune_value: str) -> str | None:
+        """Validate a tune_value before queuing.
+
+        Returns:
+            Error message string if invalid, None if valid.
+        """
+        if tune_action == "add_allowlist":
+            if len(tune_value) > self._MAX_ALLOWLIST_LEN:
+                return f"tune_value too long ({len(tune_value)} > {self._MAX_ALLOWLIST_LEN})"
+            # Reject bare wildcards like "*"
+            if tune_value.strip() in ("*", "*."):
+                return "bare wildcard is not allowed"
+            # Enforce DNS charset
+            if not self._DNS_CHARSET.match(tune_value):
+                return f"tune_value contains non-DNS characters: {tune_value!r}"
+        elif tune_action == "add_known_bad":
+            if len(tune_value) > self._MAX_KNOWN_BAD_LEN:
+                return f"tune_value too long ({len(tune_value)} > {self._MAX_KNOWN_BAD_LEN})"
+            # Validate regex syntax
+            try:
+                re.compile(tune_value)
+            except re.error as e:
+                return f"invalid regex: {e}"
+        return None
+
     def _apply_tune(self, concern: OODAConcern) -> str | None:
-        """Apply a tune action from a concern.
+        """Queue a tune action for human approval instead of applying directly.
 
         Returns:
             Action description string, or None if skipped.
@@ -446,29 +495,40 @@ class OODAWatchdog:
             )
             return None
 
-        try:
-            update_tunable_field(
-                concern.tune_action,
-                concern.tune_value,
-                config_path=self.config_path,
+        # Validate tune_value
+        error = self._validate_tune_value(concern.tune_action, concern.tune_value)
+        if error:
+            logger.warning(
+                "Watchdog tune value rejected for %s: %s",
+                concern.title, error,
             )
-        except (RuntimeError, ValueError, OSError) as e:
-            logger.warning("Watchdog tune action failed: %s", e)
+            return None
+
+        # Queue for human approval instead of applying directly
+        try:
+            self.store.insert_pending_tune({
+                "id": str(uuid.uuid4()),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "cycle_number": self._cycle_number,
+                "tune_action": concern.tune_action,
+                "tune_value": concern.tune_value,
+                "concern_title": concern.title,
+                "concern_description": concern.description,
+                "severity": concern.severity,
+                "confidence": concern.confidence,
+                "status": "pending",
+            })
+        except Exception as e:
+            logger.warning("Failed to queue tune action: %s", e)
             return None
 
         logger.info(
-            "Watchdog tuned config: %s = %r",
+            "Watchdog queued tune action for approval: %s = %r",
             concern.tune_action,
             concern.tune_value,
         )
 
-        # Send SIGHUP to self to trigger config reload
-        try:
-            os.kill(os.getpid(), signal.SIGHUP)
-        except OSError as e:
-            logger.warning("Failed to send SIGHUP for config reload: %s", e)
-
-        return f"tune:{concern.tune_action}={concern.tune_value}"
+        return f"pending:{concern.tune_action}={concern.tune_value}"
 
     def _store_observation(
         self,
@@ -518,7 +578,8 @@ class OODAWatchdog:
         """Run OODA cycles periodically until stopped.
 
         Runs an initial cycle after a short delay, then repeats at
-        the configured interval.
+        the configured interval.  The LLM call is offloaded to a
+        thread-pool executor so the event loop stays responsive.
         """
         self._running = True
         interval_seconds = self.interval_minutes * 60
@@ -531,9 +592,11 @@ class OODAWatchdog:
         )
         await asyncio.sleep(initial_delay)
 
+        loop = asyncio.get_event_loop()
+
         while self._running:
             try:
-                report = self.run_cycle()
+                report = await loop.run_in_executor(None, self.run_cycle)
                 concern_count = len(report.concerns)
                 action_count = sum(
                     1 for c in report.concerns

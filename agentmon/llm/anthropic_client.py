@@ -21,6 +21,7 @@ class CompletionResult:
     text: str
     input_tokens: int
     output_tokens: int
+    stop_reason: str = "end_turn"
 
 
 @dataclass
@@ -94,13 +95,17 @@ class AnthropicClient:
             return None
 
     def complete_with_usage(
-        self, system_prompt: str, user_message: str
+        self,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int | None = None,
     ) -> CompletionResult | None:
         """Send a prompt to Claude and return text + token usage.
 
         Args:
             system_prompt: System-level instructions.
             user_message: The user message / query content.
+            max_tokens: Override default max output tokens for this call.
 
         Returns:
             CompletionResult with text and token counts, or None on failure.
@@ -111,7 +116,7 @@ class AnthropicClient:
         try:
             response = self._client.messages.create(  # type: ignore[union-attr]
                 model=self.config.model,
-                max_tokens=self.config.max_tokens,
+                max_tokens=max_tokens or self.config.max_tokens,
                 temperature=self.config.temperature,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_message}],
@@ -129,6 +134,7 @@ class AnthropicClient:
                 text=text,
                 input_tokens=response.usage.input_tokens,
                 output_tokens=response.usage.output_tokens,
+                stop_reason=response.stop_reason or "end_turn",
             )
         except Exception as e:
             logger.error(f"Anthropic API error: {e}")

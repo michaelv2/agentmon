@@ -6,6 +6,7 @@ for potential Rust migration.
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Optional
 
 
@@ -103,6 +104,22 @@ class OODAConcern:
     affected_domains: list[str] = field(default_factory=list)
     tune_action: str | None = None   # "add_allowlist" | "add_known_bad"
     tune_value: str | None = None    # The domain/pattern to set
+
+
+@dataclass(frozen=True, slots=True)
+class PendingTuneAction:
+    """A tune action awaiting human approval before being applied."""
+
+    id: str
+    timestamp: datetime
+    cycle_number: int
+    tune_action: str      # "add_allowlist" | "add_known_bad"
+    tune_value: str
+    concern_title: str
+    concern_description: str
+    severity: str
+    confidence: float
+    status: str = "pending"  # "pending" | "approved" | "rejected"
 
 
 @dataclass(slots=True)

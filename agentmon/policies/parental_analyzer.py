@@ -205,6 +205,10 @@ class ParentalControlAnalyzer:
     ) -> TimeRule | None:
         """Check if any time rule is active for the given timestamp.
 
+        For overnight rules (start > end, e.g. 22:00-07:00), we check two cases:
+        1. Current time >= start and today's weekday is in rule_days (before midnight)
+        2. Current time <= end and *yesterday's* weekday is in rule_days (after midnight)
+
         Args:
             policy: Policy to check
             timestamp: Event timestamp
@@ -213,22 +217,23 @@ class ParentalControlAnalyzer:
             Active TimeRule if we're in a restricted window, None otherwise
         """
         weekday = timestamp.weekday()  # Monday=0, Sunday=6
+        prev_weekday = (weekday - 1) % 7
         current_time = timestamp.strftime("%H:%M")
 
         for rule in policy.time_rules:
-            # Check if today is in the rule's days
             rule_days = [DAY_MAP.get(d.lower(), -1) for d in rule.days]
-            if weekday not in rule_days:
-                continue
 
-            # Check if current time is within the rule's window
             if rule.start <= rule.end:
                 # Same-day window: e.g. 15:00-17:00
-                if rule.start <= current_time <= rule.end:
+                if weekday in rule_days and rule.start <= current_time <= rule.end:
                     return rule
             else:
                 # Overnight window: e.g. 22:00-07:00
-                if current_time >= rule.start or current_time <= rule.end:
+                # Before midnight: today must be in rule_days
+                if weekday in rule_days and current_time >= rule.start:
+                    return rule
+                # After midnight: yesterday must be in rule_days
+                if prev_weekday in rule_days and current_time <= rule.end:
                     return rule
 
         return None

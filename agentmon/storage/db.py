@@ -19,7 +19,7 @@ import duckdb
 from agentmon.models import DNSEvent, ConnectionEvent, Alert, Severity
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class EventStore:
@@ -238,6 +238,24 @@ class EventStore:
                 output_tokens INTEGER,
                 estimated_cost_usd DOUBLE,
                 model_used VARCHAR,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Pending tune actions (human approval gate for OODA watchdog)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_tune_actions (
+                id VARCHAR PRIMARY KEY,
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                cycle_number INTEGER NOT NULL,
+                tune_action VARCHAR NOT NULL,
+                tune_value VARCHAR NOT NULL,
+                concern_title VARCHAR NOT NULL,
+                concern_description VARCHAR NOT NULL,
+                severity VARCHAR NOT NULL,
+                confidence DOUBLE NOT NULL,
+                status VARCHAR NOT NULL DEFAULT 'pending',
+                reviewed_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -876,6 +894,91 @@ class EventStore:
             concerns_json, action_taken, api_latency_ms, input_tokens,
             output_tokens, estimated_cost_usd, model_used,
         ])
+
+    # =========================================================================
+    # Pending Tune Action Methods
+    # =========================================================================
+
+    def insert_pending_tune(self, action: dict) -> str:
+        """Insert a pending tune action.
+
+        Args:
+            action: Dict with id, timestamp, cycle_number, tune_action,
+                tune_value, concern_title, concern_description, severity,
+                confidence, status.
+
+        Returns:
+            The tune action ID.
+        """
+        self.conn.execute("""
+            INSERT INTO pending_tune_actions (
+                id, timestamp, cycle_number, tune_action, tune_value,
+                concern_title, concern_description, severity, confidence, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            action["id"],
+            action["timestamp"],
+            action["cycle_number"],
+            action["tune_action"],
+            action["tune_value"],
+            action["concern_title"],
+            action["concern_description"],
+            action["severity"],
+            action["confidence"],
+            action.get("status", "pending"),
+        ])
+        return action["id"]
+
+    def get_pending_tunes(self, status: str = "pending") -> list[dict]:
+        """Get pending tune actions filtered by status.
+
+        Args:
+            status: Filter by status ("pending", "approved", "rejected").
+
+        Returns:
+            List of dicts with tune action details.
+        """
+        result = self.conn.execute("""
+            SELECT id, timestamp, cycle_number, tune_action, tune_value,
+                   concern_title, concern_description, severity, confidence,
+                   status, reviewed_at, created_at
+            FROM pending_tune_actions
+            WHERE status = ?
+            ORDER BY created_at DESC
+        """, [status]).fetchall()
+
+        columns = [
+            "id", "timestamp", "cycle_number", "tune_action", "tune_value",
+            "concern_title", "concern_description", "severity", "confidence",
+            "status", "reviewed_at", "created_at",
+        ]
+        return [dict(zip(columns, row, strict=True)) for row in result]
+
+    def update_pending_tune_status(self, tune_id: str, status: str) -> bool:
+        """Update the status of a pending tune action.
+
+        Args:
+            tune_id: The tune action ID.
+            status: New status ("approved" or "rejected").
+
+        Returns:
+            True if the tune action was found and updated.
+        """
+        count_row = self.conn.execute(
+            "SELECT COUNT(*) FROM pending_tune_actions WHERE id = ?",
+            [tune_id],
+        ).fetchone()
+        count: int = count_row[0] if count_row else 0
+
+        if count == 0:
+            return False
+
+        self.conn.execute("""
+            UPDATE pending_tune_actions
+            SET status = ?, reviewed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, [status, tune_id])
+        return True
 
     # =========================================================================
     # Data Retention / Cleanup Methods

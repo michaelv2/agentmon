@@ -335,11 +335,10 @@ class TestOODAWatchdog:
         assert len(report.concerns) == 1
         assert report.concerns[0].severity == "medium"
 
-    def test_tune_action_add_allowlist(
+    def test_tune_action_add_allowlist_queued(
         self, populated_store: EventStore, mock_llm: MagicMock, tmp_path: Path
     ) -> None:
-        """Tune action writes to config and sends SIGHUP."""
-        # Create a minimal config file
+        """Tune action is queued for approval, not applied directly."""
         config_file = tmp_path / "agentmon.toml"
         config_file.write_text("[analyzer]\nallowlist = []\n")
 
@@ -361,18 +360,18 @@ class TestOODAWatchdog:
         watchdog = OODAWatchdog(
             populated_store, mock_llm, interval_minutes=5, config_path=config_file
         )
+        report = watchdog.run_cycle()
 
-        with patch("agentmon.watchdog.ooda.os.kill") as mock_kill:
-            report = watchdog.run_cycle()
-
-        assert "tune:add_allowlist" in report.action_taken
-        # Verify config was updated
+        assert "pending:add_allowlist" in report.action_taken
+        # Config should NOT have been modified
         import tomli
         with open(config_file, "rb") as f:
             data = tomli.load(f)
-        assert "*.crashlytics.com" in data["analyzer"]["allowlist"]
-        # Verify SIGHUP was sent
-        mock_kill.assert_called_once()
+        assert data["analyzer"]["allowlist"] == []
+        # DB should contain the pending action
+        rows = populated_store.get_pending_tunes(status="pending")
+        assert len(rows) == 1
+        assert rows[0]["tune_value"] == "*.crashlytics.com"
 
     def test_tune_action_invalid_tune_action_skipped(
         self, populated_store: EventStore, mock_llm: MagicMock
@@ -424,3 +423,211 @@ class TestOODAWatchdog:
         watchdog._running = True
         watchdog.stop()
         assert not watchdog._running
+
+
+# =========================================================================
+# Tune Action Queuing & Validation Tests
+# =========================================================================
+
+
+class TestTuneActionQueuing:
+    """Tests for tune action queuing instead of direct config mutation."""
+
+    def test_apply_tune_inserts_into_db(
+        self, populated_store: EventStore, mock_llm: MagicMock, tmp_path: Path
+    ) -> None:
+        """_apply_tune() should insert into DB instead of writing config."""
+        config_file = tmp_path / "agentmon.toml"
+        config_file.write_text("[analyzer]\nallowlist = []\n")
+
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Benign domain",
+            "concerns": [{
+                "title": "Add to allowlist",
+                "description": "Repeated benign alerts",
+                "severity": "info",
+                "confidence": 0.95,
+                "recommended_action": "tune",
+                "tune_action": "add_allowlist",
+                "tune_value": "*.crashlytics.com",
+                "affected_clients": [],
+                "affected_domains": ["*.crashlytics.com"],
+            }],
+        }))
+
+        watchdog = OODAWatchdog(
+            populated_store, mock_llm, interval_minutes=5, config_path=config_file
+        )
+        report = watchdog.run_cycle()
+
+        assert "pending" in report.action_taken
+
+        # Config should NOT have been modified
+        import tomli
+        with open(config_file, "rb") as f:
+            data = tomli.load(f)
+        assert data["analyzer"]["allowlist"] == []
+
+        # DB should contain the pending tune action
+        rows = populated_store.get_pending_tunes(status="pending")
+        assert len(rows) == 1
+        assert rows[0]["tune_value"] == "*.crashlytics.com"
+
+    def test_invalid_tune_value_non_dns_chars_rejected(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """tune_value with non-DNS characters should be rejected."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Test",
+            "concerns": [{
+                "title": "Bad value",
+                "description": "Non-DNS chars",
+                "severity": "info",
+                "confidence": 0.9,
+                "recommended_action": "tune",
+                "tune_action": "add_allowlist",
+                "tune_value": "evil; rm -rf /",
+                "affected_clients": [],
+                "affected_domains": [],
+            }],
+        }))
+
+        watchdog = OODAWatchdog(populated_store, mock_llm, interval_minutes=5)
+        report = watchdog.run_cycle()
+
+        assert report.action_taken == "no_action"
+
+    def test_invalid_tune_value_bare_wildcard_rejected(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """Bare wildcard '*' should be rejected for add_allowlist."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Test",
+            "concerns": [{
+                "title": "Bare wildcard",
+                "description": "Wildcard all",
+                "severity": "info",
+                "confidence": 0.9,
+                "recommended_action": "tune",
+                "tune_action": "add_allowlist",
+                "tune_value": "*",
+                "affected_clients": [],
+                "affected_domains": [],
+            }],
+        }))
+
+        watchdog = OODAWatchdog(populated_store, mock_llm, interval_minutes=5)
+        report = watchdog.run_cycle()
+
+        assert report.action_taken == "no_action"
+
+    def test_invalid_tune_value_too_long_rejected(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """tune_value exceeding max length should be rejected."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Test",
+            "concerns": [{
+                "title": "Too long",
+                "description": "Excessively long value",
+                "severity": "info",
+                "confidence": 0.9,
+                "recommended_action": "tune",
+                "tune_action": "add_allowlist",
+                "tune_value": "a" * 300 + ".com",
+                "affected_clients": [],
+                "affected_domains": [],
+            }],
+        }))
+
+        watchdog = OODAWatchdog(populated_store, mock_llm, interval_minutes=5)
+        report = watchdog.run_cycle()
+
+        assert report.action_taken == "no_action"
+
+    def test_invalid_known_bad_regex_rejected(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """Invalid regex for add_known_bad should be rejected."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Test",
+            "concerns": [{
+                "title": "Bad regex",
+                "description": "Invalid regex",
+                "severity": "info",
+                "confidence": 0.9,
+                "recommended_action": "tune",
+                "tune_action": "add_known_bad",
+                "tune_value": "[invalid(regex",
+                "affected_clients": [],
+                "affected_domains": [],
+            }],
+        }))
+
+        watchdog = OODAWatchdog(populated_store, mock_llm, interval_minutes=5)
+        report = watchdog.run_cycle()
+
+        assert report.action_taken == "no_action"
+
+    def test_confidence_clamped_to_unit_range(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """Confidence values outside [0.0, 1.0] should be clamped."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Test",
+            "concerns": [
+                {
+                    "title": "High confidence",
+                    "description": "Confidence above 1.0",
+                    "severity": "medium",
+                    "confidence": 99.0,
+                    "recommended_action": "monitor",
+                    "affected_clients": [],
+                    "affected_domains": [],
+                },
+                {
+                    "title": "Negative confidence",
+                    "description": "Confidence below 0.0",
+                    "severity": "low",
+                    "confidence": -5.0,
+                    "recommended_action": "monitor",
+                    "affected_clients": [],
+                    "affected_domains": [],
+                },
+            ],
+        }))
+
+        watchdog = OODAWatchdog(populated_store, mock_llm, interval_minutes=5)
+        report = watchdog.run_cycle()
+
+        assert len(report.concerns) == 2
+        assert report.concerns[0].confidence == 1.0
+        assert report.concerns[1].confidence == 0.0
+
+    def test_valid_values_queued_as_pending(
+        self, populated_store: EventStore, mock_llm: MagicMock
+    ) -> None:
+        """Valid tune values are queued as pending in the DB."""
+        mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
+            "assessment": "Test",
+            "concerns": [{
+                "title": "Valid tune",
+                "description": "Benign domain",
+                "severity": "info",
+                "confidence": 0.9,
+                "recommended_action": "tune",
+                "tune_action": "add_allowlist",
+                "tune_value": "*.netflix.com",
+                "affected_clients": [],
+                "affected_domains": ["*.netflix.com"],
+            }],
+        }))
+
+        watchdog = OODAWatchdog(populated_store, mock_llm, interval_minutes=5)
+        report = watchdog.run_cycle()
+
+        assert "pending" in report.action_taken
+        rows = populated_store.get_pending_tunes(status="pending")
+        assert len(rows) == 1
+        assert rows[0]["tune_action"] == "add_allowlist"
+        assert rows[0]["tune_value"] == "*.netflix.com"

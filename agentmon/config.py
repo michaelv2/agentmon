@@ -3,6 +3,7 @@
 Loads settings from TOML config file with CLI override support.
 """
 
+import fcntl
 import logging
 import os
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ ENV_SLACK_WEBHOOK = "AGENTMON_SLACK_WEBHOOK"
 ENV_OLLAMA_HOST = "OLLAMA_HOST"
 ENV_VIRUSTOTAL_API_KEY = "VIRUSTOTAL_API_KEY"
 ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+ENV_DASHBOARD_TOKEN = "AGENTMON_DASHBOARD_TOKEN"
 
 
 def get_default_config_path() -> Path:
@@ -122,6 +124,7 @@ class Config:
     # Dashboard
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
+    dashboard_api_token: str | None = None
 
     # Volume Anomaly Detection
     volume_anomaly_enabled: bool = False
@@ -140,7 +143,7 @@ class Config:
     watchdog_enabled: bool = False
     watchdog_interval_minutes: int = 15
     watchdog_model: str = "claude-sonnet-4-6"
-    watchdog_max_tokens_per_cycle: int = 1024
+    watchdog_max_tokens_per_cycle: int = 4096
     watchdog_window_minutes: Optional[int] = None
 
     # Anthropic (Claude) API
@@ -442,12 +445,20 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.dashboard_host = dash["host"]
         if "port" in dash:
             config.dashboard_port = dash["port"]
+        if "api_token" in dash:
+            config.dashboard_api_token = dash["api_token"]
 
     # ANTHROPIC_API_KEY env var
     env_anthropic_key = os.environ.get(ENV_ANTHROPIC_API_KEY)
     if env_anthropic_key:
         config.anthropic_api_key = env_anthropic_key
         logger.info("Anthropic API key loaded from environment variable")
+
+    # AGENTMON_DASHBOARD_TOKEN env var
+    env_dashboard_token = os.environ.get(ENV_DASHBOARD_TOKEN)
+    if env_dashboard_token:
+        config.dashboard_api_token = env_dashboard_token
+        logger.info("Dashboard API token loaded from environment variable")
 
     return config
 
@@ -559,38 +570,63 @@ def append_to_allowlist(domain: str, config_path: Optional[Path] = None) -> Path
             "Install with: pip install tomli-w"
         ) from e
 
-    # Read existing config
-    with open(config_path, "rb") as f:
-        data = tomli.load(f) if config_path.stat().st_size > 0 else {}
+    # Use file lock to prevent concurrent read-modify-write races
+    lock_path = config_path.with_suffix(".toml.lock")
+    lock_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-    # Ensure [analyzer] section exists
-    if "analyzer" not in data:
-        data["analyzer"] = {}
+        # Read existing config
+        with open(config_path, "rb") as f:
+            data = tomli.load(f) if config_path.stat().st_size > 0 else {}
 
-    # Ensure allowlist exists as a list
-    if "allowlist" not in data["analyzer"]:
-        data["analyzer"]["allowlist"] = []
+        # Ensure [analyzer] section exists
+        if "analyzer" not in data:
+            data["analyzer"] = {}
 
-    # Add domain if not already present
-    if domain not in data["analyzer"]["allowlist"]:
+        # Ensure allowlist exists as a list
+        if "allowlist" not in data["analyzer"]:
+            data["analyzer"]["allowlist"] = []
+
+        # Skip if already present or covered by an existing wildcard
+        existing = data["analyzer"]["allowlist"]
+        if domain in existing:
+            logger.debug(f"'{domain}' already in allowlist, skipping")
+            return config_path
+        # Check if an existing wildcard covers this domain.
+        # e.g. *.devices.a2z.com covers *.minerva.devices.a2z.com
+        bare = domain.lstrip("*.")  # "minerva.devices.a2z.com"
+        for entry in existing:
+            if entry.startswith("*."):
+                suffix = entry[1:]  # ".devices.a2z.com"
+                if bare.endswith(suffix) or bare == entry[2:]:
+                    logger.debug(
+                        f"'{domain}' already covered by '{entry}' in allowlist, skipping"
+                    )
+                    return config_path
+
         data["analyzer"]["allowlist"].append(domain)
 
-    # Atomic write: temp file + rename
-    import tempfile
-    temp_fd, temp_path = tempfile.mkstemp(
-        dir=config_path.parent, suffix=".toml.tmp"
-    )
-    try:
-        with os.fdopen(temp_fd, "wb") as f:
-            tomli_w.dump(data, f)
-        os.replace(temp_path, config_path)
-    except Exception:
-        # Clean up temp file on failure
+        # Atomic write: temp file + rename
+        import tempfile
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=config_path.parent, suffix=".toml.tmp"
+        )
         try:
-            os.unlink(temp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(temp_fd, "wb") as f:
+                tomli_w.dump(data, f)
+            os.replace(temp_path, config_path)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
     logger.info(f"Added '{domain}' to allowlist in {config_path}")
     return config_path
@@ -639,31 +675,44 @@ def update_tunable_field(
                 "Install with: pip install tomli-w"
             ) from e
 
-        with open(config_path, "rb") as f:
-            data = tomli.load(f) if config_path.stat().st_size > 0 else {}
+        # Use file lock to prevent concurrent read-modify-write races
+        lock_path = config_path.with_suffix(".toml.lock")
+        lock_fd = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-        if "analyzer" not in data:
-            data["analyzer"] = {}
-        if "known_bad_patterns" not in data["analyzer"]:
-            data["analyzer"]["known_bad_patterns"] = []
+            with open(config_path, "rb") as f:
+                data = tomli.load(f) if config_path.stat().st_size > 0 else {}
 
-        if value not in data["analyzer"]["known_bad_patterns"]:
+            if "analyzer" not in data:
+                data["analyzer"] = {}
+            if "known_bad_patterns" not in data["analyzer"]:
+                data["analyzer"]["known_bad_patterns"] = []
+
+            if value in data["analyzer"]["known_bad_patterns"]:
+                logger.debug(f"'{value}' already in known_bad_patterns, skipping")
+                return config_path
+
             data["analyzer"]["known_bad_patterns"].append(value)
 
-        import tempfile
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=config_path.parent, suffix=".toml.tmp"
-        )
-        try:
-            with os.fdopen(temp_fd, "wb") as f:
-                tomli_w.dump(data, f)
-            os.replace(temp_path, config_path)
-        except Exception:
+            import tempfile
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=config_path.parent, suffix=".toml.tmp"
+            )
             try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-            raise
+                with os.fdopen(temp_fd, "wb") as f:
+                    tomli_w.dump(data, f)
+                os.replace(temp_path, config_path)
+            except Exception:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+                raise
+
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
 
         logger.info(f"Added '{value}' to known_bad_patterns in {config_path}")
         return config_path

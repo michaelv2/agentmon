@@ -97,6 +97,10 @@ class SyslogConfig:
 # RFC 5424 recommends 2048 bytes minimum, we allow up to 8KB to be generous
 MAX_SYSLOG_MESSAGE_LENGTH = 8192
 
+# Maximum TCP buffer size to prevent OOM from senders that never send newlines.
+# 64KB is generous for any valid syslog message.
+MAX_TCP_BUFFER_SIZE = 65536
+
 
 def parse_syslog_message(
     data: bytes,
@@ -261,6 +265,17 @@ class TCPSyslogProtocol(asyncio.Protocol):
 
     def data_received(self, data: bytes) -> None:
         self.buffer += data
+
+        # Guard against unbounded buffer growth (OOM protection)
+        if len(self.buffer) > MAX_TCP_BUFFER_SIZE:
+            logger.warning(
+                "TCP buffer overflow from %s: %d bytes (max %d) - closing connection",
+                self.peer, len(self.buffer), MAX_TCP_BUFFER_SIZE,
+            )
+            self.buffer = b""
+            if self.transport:
+                self.transport.close()
+            return
 
         # Process complete messages (newline-delimited for TCP syslog)
         while b"\n" in self.buffer:
