@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import time
 import uuid
@@ -61,8 +62,8 @@ You MUST respond with valid JSON in this exact format:
       "recommended_action": "monitor|alert|investigate|tune",
       "affected_clients": ["192.168.1.x"],
       "affected_domains": ["example.com"],
-      "tune_action": "add_allowlist|add_known_bad (only when recommended_action is tune)",
-      "tune_value": "domain or pattern to add (only when recommended_action is tune)"
+      "tune_action": "add_allowlist or add_known_bad",
+      "tune_value": "*.example.com"
     }
   ],
   "operational_note": "Optional note about your own resource usage or suggestions"
@@ -74,6 +75,9 @@ Guidelines:
 - Use "monitor" for things worth noting but not yet actionable
 - Use "tune" with tune_action/tune_value to suggest config changes (e.g., add a benign \
 domain to the allowlist or a malicious pattern to known_bad_patterns)
+- Review recent_alerts for likely false positives from other analyzers. If a flagged domain \
+is clearly benign (e.g., a well-known service's CDN or API subdomain), recommend "tune" with \
+tune_action "add_allowlist" and an appropriate wildcard pattern (e.g., "*.netflix.com")
 - Consider time of day, query volumes, domain diversity, and client behavior
 - Be specific about what pattern triggered the concern
 - You are aware of your own operational cost (shown below) — be efficient
@@ -242,15 +246,29 @@ class OODAWatchdog:
     _VALID_SEVERITIES = frozenset({"info", "low", "medium", "high", "critical"})
     _VALID_TUNE_ACTIONS = frozenset({"add_allowlist", "add_known_bad"})
 
+    @staticmethod
+    def _extract_json(raw: str) -> str:
+        """Extract JSON from LLM response, handling code fences and quirks."""
+        text = raw.strip()
+        # Strip markdown code fences — find the actual JSON between them
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Find opening and closing fence indices
+            start = 1  # skip first line (```json or ```)
+            end = len(lines) - 1
+            for i in range(len(lines) - 1, 0, -1):
+                if lines[i].strip().startswith("```"):
+                    end = i
+                    break
+            text = "\n".join(lines[start:end])
+        # Remove trailing commas before } or ] (common LLM mistake)
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        return text
+
     def _parse_concerns(self, raw_response: str) -> list[OODAConcern]:
         """Parse LLM JSON response into OODAConcern objects."""
         try:
-            # Handle potential markdown code fences
-            text = raw_response.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                # Remove first and last lines (code fences)
-                text = "\n".join(lines[1:-1])
+            text = self._extract_json(raw_response)
 
             parsed = json.loads(text)
             concerns = []

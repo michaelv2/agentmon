@@ -826,7 +826,8 @@ def listen(
         console.print()
 
         # Write pidfile for SIGHUP-based config reload
-        pid_path = Path("/run/agentmon.pid") if Path("/run").is_dir() else cfg.db_path.parent / "agentmon.pid"
+        run_dir = Path("/run")
+        pid_path = run_dir / "agentmon.pid" if os.access(run_dir, os.W_OK) else cfg.db_path.parent / "agentmon.pid"
         pid_path.write_text(str(os.getpid()))
         logger = logging.getLogger("agentmon.cli")
         logger.info("PID %d written to %s", os.getpid(), pid_path)

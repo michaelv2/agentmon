@@ -112,17 +112,22 @@ def has_excessive_consonants(domain: str, threshold: float = 0.7) -> bool:
     """
     # Remove TLD for analysis
     parts = domain.lower().split(".")
-    check_str = "".join(parts[:-1]) if len(parts) > 1 else domain
+    labels = parts[:-1] if len(parts) > 1 else parts
 
-    # Only consider alphabetic characters
-    alpha_only = re.sub(r"[^a-z]", "", check_str)
-    if len(alpha_only) < 5:
-        return False
-
+    # Check each label individually — concatenating labels like
+    # "push"+"prod"+"netflix" inflates consonant ratio for legitimate
+    # multi-label domains.  Require 8+ alpha chars per label to avoid
+    # false positives on short brand names (e.g. "netflix" = 71%).
     vowels = set("aeiou")
-    consonant_count = sum(1 for c in alpha_only if c not in vowels)
+    for label in labels:
+        alpha_only = re.sub(r"[^a-z]", "", label)
+        if len(alpha_only) < 8:
+            continue
+        consonant_count = sum(1 for c in alpha_only if c not in vowels)
+        if (consonant_count / len(alpha_only)) > threshold:
+            return True
 
-    return (consonant_count / len(alpha_only)) > threshold
+    return False
 
 
 def looks_like_dga(domain: str) -> tuple[bool, list[str]]:
