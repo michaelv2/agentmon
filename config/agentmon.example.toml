@@ -49,10 +49,73 @@ learning_mode = false
 
 # Alert deduplication: suppress repeat alerts for same (domain, client, type)
 # within this window (seconds). Set to 0 to disable.
-alert_dedup_window = 600  # 10 minutes
+# Default 1 hour - prevents alert floods from domains like spclient.wg.spotify.com
+alert_dedup_window = 3600  # 1 hour
 
 # Maximum entries in alert dedup cache. Increase for high-traffic environments.
 alert_dedup_cache_size = 5000
+
+# DGA/entropy suppression for well-established domains.
+# Domains queried more than dga_min_queries_suppress times from more than
+# dga_min_clients_suppress unique clients are unlikely to be actual DGA.
+# Genuine DGA rarely achieves consistent high-volume queries from many clients.
+dga_min_queries_suppress = 50
+dga_min_clients_suppress = 5
+
+# Trusted infrastructure parent domains.
+# CDN/cloud providers generate high-entropy subdomains for load balancing,
+# edge routing, and asset distribution.  Domains under these parents will
+# not trigger DGA/entropy alerts (but still checked for threat feeds, etc).
+trusted_infrastructure = [
+    "akadns.net",
+    "akamaiedge.net",
+    "akamaized.net",
+    "aaplimg.com",
+    "apple.com",
+    "apple-dns.net",
+    "cloudfront.net",
+    "amazonaws.com",
+    "azure.com",
+    "azureedge.net",
+    "googleusercontent.com",
+    "googlevideo.com",
+    "gstatic.com",
+    "fbcdn.net",
+    "edgekey.net",
+    "edgesuite.net",
+    "llnwd.net",
+    "fastly.net",
+    "cloudflare.net",
+    "cdn77.org",
+]
+
+# OCSP spike detection.
+# Normal OCSP traffic (ocsp2.apple.com, ocsp.digicert.com, etc.) is high-volume,
+# but a sudden spike from a single client may indicate certificate pinning bypass.
+# Fires once per client per domain when the hourly threshold is crossed.
+ocsp_spike_enabled = true
+ocsp_spike_threshold = 100    # queries per client per hour
+ocsp_spike_severity = "medium"
+
+# Watched domains: enhanced monitoring for potential C2 fronting / exfiltration.
+# These domains are legitimate but could be abused — they get all normal
+# analysis PLUS:
+#   - LOW alert when a new client queries a watched domain for the first time
+#   - MEDIUM alert when per-client hourly volume exceeds threshold
+#
+# Supports exact match ("clients4.google.com") and wildcard suffix
+# ("*.doubleclick.net" matches all subdomains + the parent domain).
+#
+# Examples below flag known blind spots:
+#   - doubleclick.net: Ad-tracking infra; monitor for post-resolution abuse
+#   - clients4.google.com / clients.l.google.com: 25K+ queries/day in
+#     typical networks with zero scrutiny; verify not used as C2 fronting
+watched_domains = [
+    "*.doubleclick.net",
+    "clients4.google.com",
+    "*.clients.l.google.com",
+]
+watched_domain_volume_threshold = 50  # queries per client per hour
 
 # Known-bad domain patterns (label-boundary match, case-insensitive)
 # Patterns match at the start of a domain label (after '.' or at domain start)

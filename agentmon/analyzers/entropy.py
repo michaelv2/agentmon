@@ -10,6 +10,32 @@ import math
 import re
 from collections import Counter
 
+# CDN/infrastructure parent domains where high-entropy subdomains are normal.
+# These providers use algorithmically generated hostnames for load balancing,
+# edge routing, and asset distribution.
+DEFAULT_TRUSTED_INFRASTRUCTURE: frozenset[str] = frozenset({
+    "akadns.net",
+    "akamaiedge.net",
+    "akamaized.net",
+    "aaplimg.com",
+    "apple.com",
+    "apple-dns.net",
+    "cloudfront.net",
+    "amazonaws.com",
+    "azure.com",
+    "azureedge.net",
+    "googleusercontent.com",
+    "googlevideo.com",
+    "gstatic.com",
+    "fbcdn.net",
+    "edgekey.net",
+    "edgesuite.net",
+    "llnwd.net",
+    "fastly.net",
+    "cloudflare.net",
+    "cdn77.org",
+})
+
 
 def calculate_entropy(s: str) -> float:
     """Calculate Shannon entropy of a string.
@@ -176,3 +202,32 @@ def looks_like_dga(domain: str) -> tuple[bool, list[str]]:
             reasons.append("no vowels in domain")
 
     return (len(reasons) >= 2, reasons)
+
+
+def get_parent_domain(domain: str, levels: int = 2) -> str:
+    """Extract the parent domain (last N labels) from a FQDN.
+
+    Examples:
+        get_parent_domain("e1234.dscd.akamaiedge.net") -> "akamaiedge.net"
+        get_parent_domain("ocsp2.g.aaplimg.com") -> "aaplimg.com"
+        get_parent_domain("example.com") -> "example.com"
+    """
+    parts = domain.lower().split(".")
+    if len(parts) <= levels:
+        return domain.lower()
+    return ".".join(parts[-levels:])
+
+
+def is_trusted_infrastructure(
+    domain: str,
+    trusted: frozenset[str] | None = None,
+) -> bool:
+    """Check if domain is under a known CDN/infrastructure parent.
+
+    High-entropy subdomains are expected under these parents and should
+    not trigger DGA/entropy alerts.
+    """
+    if trusted is None:
+        trusted = DEFAULT_TRUSTED_INFRASTRUCTURE
+    parent = get_parent_domain(domain)
+    return parent in trusted

@@ -459,6 +459,14 @@ def listen(
         entropy_threshold=cfg.entropy_threshold,
         entropy_min_length=cfg.entropy_min_length,
         alert_dedup_window=cfg.alert_dedup_window,
+        dga_min_queries_suppress=cfg.dga_min_queries_suppress,
+        dga_min_clients_suppress=cfg.dga_min_clients_suppress,
+        trusted_infrastructure=cfg.trusted_infrastructure,
+        ocsp_spike_enabled=cfg.ocsp_spike_enabled,
+        ocsp_spike_threshold=cfg.ocsp_spike_threshold,
+        ocsp_spike_severity=cfg.ocsp_spike_severity,
+        watched_domains=cfg.watched_domains,
+        watched_domain_volume_threshold=cfg.watched_domain_volume_threshold,
     )
     # Initialize threat feed manager if configured
     threat_feed_manager = None

@@ -11,7 +11,8 @@ The LLM integration allows for intelligent classification of domains based on th
 ## Features
 
 - **Baseline learning** - Builds per-client domain baseline, alerts on new/unusual domains
-- **DGA detection** - Flags algorithmically-generated domains using entropy analysis
+- **DGA detection** - Flags algorithmically-generated domains using entropy analysis, with CDN/infrastructure trust modifier to reduce false positives
+- **Watched domains** - Enhanced monitoring for legitimate domains that could be abused as C2 fronting or data-exfiltration vectors
 - **Known-bad patterns** - Matches against configurable threat indicators (C2, malware, mining pools)
 - **Threat intelligence feeds** - Automatic updates from URLhaus, Feodo Tracker (malware/C2/phishing)
 - **LLM classification** - Two-tier Ollama integration for intelligent domain analysis
@@ -121,6 +122,25 @@ ignore_suffixes = [
     ".local", ".lan", ".home", ".internal", ".arpa",
     ".slack.com",  # Example: whitelist all Slack domains
 ]
+
+# Alert dedup: suppress repeat alerts for same (domain, client, type)
+alert_dedup_window = 3600  # 1 hour
+
+# Suppress DGA/entropy alerts on well-established domains
+dga_min_queries_suppress = 50   # total queries threshold
+dga_min_clients_suppress = 5    # unique clients threshold
+
+# OCSP spike detection (cert pinning bypass indicator)
+ocsp_spike_enabled = true
+ocsp_spike_threshold = 100  # queries per client per hour
+
+# Watched domains: enhanced monitoring for C2 fronting / exfil blind spots
+watched_domains = [
+    "*.doubleclick.net",
+    "clients4.google.com",
+    "*.clients.l.google.com",
+]
+watched_domain_volume_threshold = 50  # queries per client per hour
 ```
 
 ### LLM classification
@@ -364,9 +384,9 @@ agentmon listen --bind 192.168.1.100 --allow 192.168.1.2 --allow 192.168.1.3
 |----------|----------|
 | CRITICAL | Reserved for confirmed threats |
 | HIGH | Known-bad pattern match (C2, malware, etc.), parental control violations |
-| MEDIUM | DGA-like domain detected, device activity anomaly (off-hours) |
-| LOW | New domain from client (not in baseline) |
-| INFO | Informational observations |
+| MEDIUM | DGA-like domain detected, device activity anomaly (off-hours), OCSP query spike |
+| LOW | High-entropy domain (not full DGA), new domain from client (not in baseline) |
+| INFO | Informational observations, LLM-downgraded alerts |
 
 ## Security
 

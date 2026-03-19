@@ -501,6 +501,22 @@ class EventStore:
         """, [client, domain]).fetchone()
         return result is not None
 
+    def get_domain_popularity(self, domain: str) -> tuple[int, int]:
+        """Get total query count and unique client count for a domain.
+
+        Uses the domain_baseline table (cumulative counts) to determine
+        how well-established a domain is across all clients.
+
+        Returns:
+            Tuple of (total_queries, unique_clients).
+        """
+        result = self.conn.execute("""
+            SELECT COALESCE(SUM(query_count), 0), COUNT(DISTINCT client)
+            FROM domain_baseline
+            WHERE domain = ?
+        """, [domain]).fetchone()
+        return (result[0], result[1]) if result else (0, 0)
+
     def get_domain_first_seen(
         self, client: str, domain: str
     ) -> Optional[datetime]:

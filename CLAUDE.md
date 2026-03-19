@@ -100,8 +100,8 @@ Pi-hole/OpenWRT → Syslog → SyslogReceiver → Parsers → Analyzers → Even
   - `pihole.py`: Direct Pi-hole database collector (pull model)
 
 - **`agentmon/analyzers/`**: Threat detection engines
-  - `dns_baseline.py`: DNSBaselineAnalyzer - learns per-client domain patterns, detects new/suspicious domains
-  - `entropy.py`: DGA detection using Shannon entropy
+  - `dns_baseline.py`: DNSBaselineAnalyzer - learns per-client domain patterns, detects new/suspicious domains, OCSP spike detection
+  - `entropy.py`: DGA detection using Shannon entropy, trusted infrastructure modifier for CDN/cloud parents
   - `device_activity.py`: DeviceActivityAnalyzer - learns device activity patterns, detects off-hours anomalies
 
 - **`agentmon/llm/`**: LLM-based domain classification
@@ -148,8 +148,11 @@ The analyzer system uses a layered approach:
 
 1. **Baseline Learning**: DNSBaselineAnalyzer tracks first-seen domains per client
 2. **Pattern Matching**: Entropy analysis (DGA detection), known-bad patterns
-3. **Threat Feeds**: URLhaus and Feodo Tracker integration
-4. **LLM Classification** (optional):
+3. **False Positive Suppression**: Trusted infrastructure modifier (CDN/cloud parents), query frequency threshold (popular domains)
+4. **Threat Feeds**: URLhaus and Feodo Tracker integration
+5. **OCSP Spike Detection**: Per-client hourly volume monitoring for OCSP domains
+6. **Watched Domains**: Enhanced monitoring for potential C2 fronting / exfiltration vectors
+7. **LLM Classification** (optional):
    - Fast triage model (phi3:3.8b) for initial classification
    - Escalation to thorough model (gpt-oss:20b) for suspicious domains
    - VirusTotal integration for additional context before escalation
@@ -189,7 +192,7 @@ Configuration uses TOML format. See `config/agentmon.example.toml` for comprehen
 **Search order**: `./agentmon.toml` → `~/.config/agentmon/agentmon.toml` → `/etc/agentmon/agentmon.toml`
 
 **Key sections:**
-- `[analyzer]`: Entropy thresholds, known-bad patterns, allowlists
+- `[analyzer]`: Entropy thresholds, known-bad patterns, allowlists, trusted infrastructure, DGA suppression, OCSP spike detection, watched domains
 - `[llm]`: Ollama models, escalation settings
 - `[threat_feeds]`: URLhaus/Feodo integration
 - `[virustotal]`: API key (prefer env var: `VIRUSTOTAL_API_KEY`)
@@ -230,8 +233,31 @@ Configuration uses TOML format. See `config/agentmon.example.toml` for comprehen
 ### Alert Deduplication
 
 - DNSBaselineAnalyzer maintains in-memory TTL cache of recent alerts
-- Default: 10 minutes deduplication window, 5000 alert cache size
-- Prevents alert spam for repeated queries to same domain
+- Default: 1 hour deduplication window, 5000 alert cache size
+- Prevents alert spam for repeated queries to same domain (e.g., `spclient.wg.spotify.com`)
+
+### False Positive Reduction
+
+- **Trusted infrastructure modifier**: High-entropy subdomains under known CDN/cloud parents (Akamai, Apple, CloudFront, AWS, etc.) are suppressed from DGA/entropy alerts. Configurable via `[analyzer] trusted_infrastructure`.
+- **Query frequency threshold**: Domains queried >50 times from >5 unique clients are suppressed from DGA/entropy alerts. Genuine DGA rarely achieves consistent high-volume queries from many clients. Configurable via `dga_min_queries_suppress` and `dga_min_clients_suppress`.
+- **LLM severity downgrade**: When enabled, LLM classification of benign/CDN/cloud domains downgrades alert severity.
+
+### OCSP Spike Detection
+
+- Monitors per-client query rates for OCSP domains (domains starting with `ocsp`)
+- Fires once per client per domain when hourly count exceeds threshold (default: 100)
+- Sudden OCSP spikes may indicate certificate pinning bypass attempts
+- Configurable via `[analyzer] ocsp_spike_enabled`, `ocsp_spike_threshold`, `ocsp_spike_severity`
+
+### Watched Domains
+
+- Enhanced monitoring for domains that are legitimate but could be abused as C2 fronting or data-exfiltration vectors
+- Supports exact match and wildcard suffix (`*.doubleclick.net`)
+- Two detection types:
+  - **First-query alert** (LOW): fires when a new client queries a watched domain for the first time
+  - **Volume spike alert** (MEDIUM): fires when per-client hourly query count exceeds threshold (default: 50)
+- Use cases: ad-tracking infrastructure (`*.doubleclick.net`), Google infrastructure used for domain fronting (`clients4.google.com`, `*.clients.l.google.com`)
+- Configurable via `[analyzer] watched_domains`, `watched_domain_volume_threshold`
 
 ### Syslog Message Handling
 

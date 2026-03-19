@@ -71,8 +71,31 @@ class Config:
     ignore_suffixes: list[str] = field(default_factory=lambda: [
         ".local", ".lan", ".home", ".internal", ".localdomain", ".arpa"
     ])
-    alert_dedup_window: int = 600  # 10 minutes
+    alert_dedup_window: int = 3600  # 1 hour
     alert_dedup_cache_size: int = 5000
+
+    # DGA/entropy suppression for well-established domains
+    dga_min_queries_suppress: int = 50
+    dga_min_clients_suppress: int = 5
+
+    # Trusted infrastructure parents (high-entropy subdomains are expected)
+    trusted_infrastructure: set[str] = field(default_factory=lambda: {
+        "akadns.net", "akamaiedge.net", "akamaized.net",
+        "aaplimg.com", "apple.com", "apple-dns.net",
+        "cloudfront.net", "amazonaws.com", "azure.com", "azureedge.net",
+        "googleusercontent.com", "googlevideo.com", "gstatic.com",
+        "fbcdn.net", "edgekey.net", "edgesuite.net",
+        "llnwd.net", "fastly.net", "cloudflare.net", "cdn77.org",
+    })
+
+    # OCSP spike detection
+    ocsp_spike_enabled: bool = True
+    ocsp_spike_threshold: int = 100  # queries per client per hour
+    ocsp_spike_severity: str = "medium"
+
+    # Watched domains: enhanced monitoring for potential C2 fronting / exfil
+    watched_domains: list[str] = field(default_factory=list)
+    watched_domain_volume_threshold: int = 50  # queries per client per hour
 
     # LLM (two-tier)
     llm_enabled: bool = False
@@ -305,6 +328,22 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.alert_dedup_window = analyzer["alert_dedup_window"]
         if "alert_dedup_cache_size" in analyzer:
             config.alert_dedup_cache_size = analyzer["alert_dedup_cache_size"]
+        if "dga_min_queries_suppress" in analyzer:
+            config.dga_min_queries_suppress = analyzer["dga_min_queries_suppress"]
+        if "dga_min_clients_suppress" in analyzer:
+            config.dga_min_clients_suppress = analyzer["dga_min_clients_suppress"]
+        if "trusted_infrastructure" in analyzer:
+            config.trusted_infrastructure = set(analyzer["trusted_infrastructure"])
+        if "ocsp_spike_enabled" in analyzer:
+            config.ocsp_spike_enabled = analyzer["ocsp_spike_enabled"]
+        if "ocsp_spike_threshold" in analyzer:
+            config.ocsp_spike_threshold = analyzer["ocsp_spike_threshold"]
+        if "ocsp_spike_severity" in analyzer:
+            config.ocsp_spike_severity = analyzer["ocsp_spike_severity"]
+        if "watched_domains" in analyzer:
+            config.watched_domains = analyzer["watched_domains"]
+        if "watched_domain_volume_threshold" in analyzer:
+            config.watched_domain_volume_threshold = analyzer["watched_domain_volume_threshold"]
 
     # LLM section
     if "llm" in data:
@@ -563,6 +602,12 @@ _TUNABLE_FIELDS: set[str] = {
     "entropy_min_length",
     "ignore_suffixes",
     "alert_dedup_window",
+    "dga_min_queries_suppress",
+    "dga_min_clients_suppress",
+    "trusted_infrastructure",
+    "ocsp_spike_threshold",
+    "watched_domains",
+    "watched_domain_volume_threshold",
     "parental_devices",
     "parental_policies",
 }

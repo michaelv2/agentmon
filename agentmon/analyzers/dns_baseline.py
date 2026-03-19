@@ -6,19 +6,22 @@ Builds a baseline of normal DNS behavior per client and flags anomalies.
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
 
 from cachetools import TTLCache
 
-from agentmon.models import DNSEvent, Alert, Severity
+from agentmon.analyzers.entropy import (
+    DEFAULT_TRUSTED_INFRASTRUCTURE,
+    is_high_entropy_domain,
+    is_trusted_infrastructure,
+    looks_like_dga,
+)
+from agentmon.models import Alert, DNSEvent, Severity
 from agentmon.storage.db import EventStore
-from agentmon.analyzers.entropy import looks_like_dga, is_high_entropy_domain
 
 logger = logging.getLogger(__name__)
 
 # Default alert deduplication settings
-DEFAULT_DEDUP_WINDOW = 600  # 10 minutes
+DEFAULT_DEDUP_WINDOW = 3600  # 1 hour (raised from 10min to suppress repeat alerts)
 DEFAULT_DEDUP_CACHE_SIZE = 5000
 
 # Categories considered "benign" for severity downgrade purposes
@@ -67,6 +70,36 @@ class AnalyzerConfig:
     alert_dedup_window: int = DEFAULT_DEDUP_WINDOW  # seconds
     alert_dedup_cache_size: int = DEFAULT_DEDUP_CACHE_SIZE
 
+    # Query frequency threshold: suppress DGA/entropy alerts on domains that
+    # have been queried more than dga_min_queries_suppress times by more than
+    # dga_min_clients_suppress unique clients.  Genuine DGA domains rarely
+    # achieve consistent high-volume queries from many clients.
+    dga_min_queries_suppress: int = 50
+    dga_min_clients_suppress: int = 5
+
+    # Trusted infrastructure parent domains.  High-entropy subdomains are
+    # expected under CDN/cloud providers (Akamai, Apple, CloudFront, etc.)
+    # and should not trigger DGA/entropy alerts.
+    trusted_infrastructure: set[str] = field(
+        default_factory=lambda: set(DEFAULT_TRUSTED_INFRASTRUCTURE)
+    )
+
+    # OCSP spike detection: alert when a single client makes an abnormally
+    # high number of OCSP queries in one hour.  Normal OCSP is high-volume,
+    # but sudden spikes may indicate certificate pinning bypass attempts.
+    ocsp_spike_enabled: bool = True
+    ocsp_spike_threshold: int = 100  # queries per client per hour
+    ocsp_spike_severity: str = "medium"
+
+    # Watched domains: enhanced monitoring for domains that are legitimate
+    # but could be abused as C2 fronting or data-exfiltration vectors.
+    # Supports exact match and wildcard suffix ("*.doubleclick.net").
+    # Watched domains get all normal analysis PLUS:
+    #   - LOW alert when a new client queries a watched domain for the first time
+    #   - MEDIUM alert when per-client hourly volume exceeds threshold
+    watched_domains: list[str] = field(default_factory=list)
+    watched_domain_volume_threshold: int = 50  # queries per client per hour
+
 
 class DNSBaselineAnalyzer:
     """Analyzes DNS events against a learned baseline."""
@@ -74,7 +107,7 @@ class DNSBaselineAnalyzer:
     def __init__(
         self,
         store: EventStore,
-        config: Optional[AnalyzerConfig] = None,
+        config: AnalyzerConfig | None = None,
         threat_feed_manager=None,
         vt_client=None,
     ) -> None:
@@ -91,6 +124,20 @@ class DNSBaselineAnalyzer:
             ttl=self.config.alert_dedup_window,
         )
         self._dedup_hits = 0
+
+        # Precompute trusted infrastructure frozenset (avoids per-call conversion)
+        self._trusted_infra: frozenset[str] = frozenset(
+            self.config.trusted_infrastructure
+        )
+
+        # OCSP spike detection: per-client per-domain hourly counters
+        # Key: domain -> {client: count}
+        self._ocsp_hourly_counts: dict[str, dict[str, int]] = {}
+        self._ocsp_current_hour: int | None = None
+
+        # Watched domain volume tracking: per-client per-domain hourly counters
+        self._watched_hourly_counts: dict[str, dict[str, int]] = {}
+        self._watched_current_hour: int | None = None
 
         # Initialize LLM classifier if enabled
         if self.config.llm_enabled:
@@ -118,7 +165,7 @@ class DNSBaselineAnalyzer:
             logger.warning(f"Failed to initialize LLM classifier: {e}")
             self._classifier_available = False
 
-    def _classify_domain(self, event: DNSEvent) -> Optional[str]:
+    def _classify_domain(self, event: DNSEvent) -> str | None:
         """Classify a domain using the LLM.
 
         Returns the classification as a string, or None if unavailable.
@@ -266,6 +313,17 @@ class DNSBaselineAnalyzer:
                 self._enrich_alert_with_llm(dga_alert, event)
                 alerts.append(dga_alert)
 
+        # Check 2.5: OCSP volume spike detection
+        ocsp_alert = self._check_ocsp_spike(event, domain_lower)
+        if ocsp_alert:
+            if not self._is_duplicate_alert(domain_lower, event.client, "ocsp_spike"):
+                self._enrich_alert_with_llm(ocsp_alert, event)
+                alerts.append(ocsp_alert)
+
+        # Check 2.7: Watched domain enhanced monitoring
+        watched_alerts = self._check_watched_domain(event, domain_lower)
+        alerts.extend(watched_alerts)
+
         # Check 3: New domain (not in baseline)
         if not self.config.learning_mode:
             new_domain_alert = self._check_new_domain(event, domain_lower)
@@ -317,7 +375,7 @@ class DNSBaselineAnalyzer:
                 return True
         return False
 
-    def _check_threat_feed(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
+    def _check_threat_feed(self, event: DNSEvent, domain_lower: str) -> Alert | None:
         """Check if domain is in external threat intelligence feeds."""
         if not self._threat_feed_manager:
             return None
@@ -375,7 +433,7 @@ class DNSBaselineAnalyzer:
                     return True
             idx += 1
 
-    def _check_known_bad(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
+    def _check_known_bad(self, event: DNSEvent, domain_lower: str) -> Alert | None:
         """Check if domain matches known-bad patterns."""
         for pattern in self.config.known_bad_patterns:
             if self._matches_at_label_boundary(domain_lower, pattern):
@@ -396,11 +454,39 @@ class DNSBaselineAnalyzer:
                 )
         return None
 
-    def _check_dga(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
+    def _is_suppressed_by_popularity(self, domain_lower: str) -> bool:
+        """Check if a domain is well-established (high query volume from many clients).
+
+        Genuine DGA domains rarely achieve consistent high-volume queries from
+        many clients.  Suppress alerts for domains that exceed both thresholds.
+        """
+        total_queries, unique_clients = self.store.get_domain_popularity(domain_lower)
+        if (total_queries >= self.config.dga_min_queries_suppress
+                and unique_clients >= self.config.dga_min_clients_suppress):
+            logger.debug(
+                "DGA/entropy suppressed for popular domain: %s "
+                "(%d queries, %d clients)",
+                domain_lower, total_queries, unique_clients,
+            )
+            return True
+        return False
+
+    def _check_dga(self, event: DNSEvent, domain_lower: str) -> Alert | None:
         """Check if domain looks like DGA output."""
         is_dga, reasons = looks_like_dga(domain_lower)
 
         if is_dga:
+            # Suppress for trusted CDN/infrastructure parents
+            if is_trusted_infrastructure(domain_lower, self._trusted_infra):
+                logger.debug(
+                    "DGA suppressed for trusted infrastructure: %s", domain_lower
+                )
+                return None
+
+            # Suppress for well-established domains (many clients, high volume)
+            if self._is_suppressed_by_popularity(domain_lower):
+                return None
+
             return Alert(
                 id=str(uuid.uuid4()),
                 timestamp=event.timestamp,
@@ -426,6 +512,17 @@ class DNSBaselineAnalyzer:
         )
 
         if is_high_ent and not is_dga:  # Don't double-alert
+            # Same suppression checks for standalone entropy alerts
+            if is_trusted_infrastructure(domain_lower, self._trusted_infra):
+                logger.debug(
+                    "Entropy alert suppressed for trusted infrastructure: %s",
+                    domain_lower,
+                )
+                return None
+
+            if self._is_suppressed_by_popularity(domain_lower):
+                return None
+
             return Alert(
                 id=str(uuid.uuid4()),
                 timestamp=event.timestamp,
@@ -445,7 +542,159 @@ class DNSBaselineAnalyzer:
 
         return None
 
-    def _check_new_domain(self, event: DNSEvent, domain_lower: str) -> Optional[Alert]:
+    def _check_ocsp_spike(self, event: DNSEvent, domain_lower: str) -> Alert | None:
+        """Check for OCSP query volume spikes from a single client.
+
+        Normal OCSP traffic is high-volume, but a sudden spike from one client
+        may indicate certificate pinning bypass attempts.  Tracks per-client
+        per-domain query counts within each clock hour and fires once when
+        the threshold is reached.
+        """
+        if not self.config.ocsp_spike_enabled:
+            return None
+
+        # Only track domains whose first label starts with "ocsp"
+        first_label = domain_lower.split(".")[0]
+        if not first_label.startswith("ocsp"):
+            return None
+
+        # Reset counters on hour boundary (based on event time, not wall clock)
+        current_hour = event.timestamp.hour
+        if self._ocsp_current_hour != current_hour:
+            self._ocsp_hourly_counts.clear()
+            self._ocsp_current_hour = current_hour
+
+        # Increment counter
+        if domain_lower not in self._ocsp_hourly_counts:
+            self._ocsp_hourly_counts[domain_lower] = {}
+        client_counts = self._ocsp_hourly_counts[domain_lower]
+        client_counts[event.client] = client_counts.get(event.client, 0) + 1
+
+        count = client_counts[event.client]
+        # Alert exactly once when threshold is crossed
+        if count == self.config.ocsp_spike_threshold:
+            try:
+                severity = Severity(self.config.ocsp_spike_severity)
+            except ValueError:
+                severity = Severity.MEDIUM
+            return Alert(
+                id=str(uuid.uuid4()),
+                timestamp=event.timestamp,
+                severity=severity,
+                title=f"OCSP query spike: {event.domain}",
+                description=(
+                    f"Client {event.client} made {count} OCSP queries to "
+                    f"'{event.domain}' in the current hour "
+                    f"(threshold: {self.config.ocsp_spike_threshold}). "
+                    f"Sudden OCSP spikes may indicate certificate pinning "
+                    f"bypass attempts."
+                ),
+                source_event_type="dns",
+                client=event.client,
+                domain=event.domain,
+                analyzer="dns_baseline.ocsp_spike",
+                confidence=0.4,
+                tags=["ocsp", "volume_spike"],
+            )
+
+        return None
+
+    def _is_watched(self, domain: str) -> bool:
+        """Check if domain matches the watched domains list.
+
+        Same matching semantics as the allowlist: exact match or wildcard
+        suffix ("*.example.com" matches subdomains and the parent).
+        """
+        for entry in self.config.watched_domains:
+            if entry.startswith("*."):
+                suffix = entry[1:]  # ".doubleclick.net"
+                parent = entry[2:]  # "doubleclick.net"
+                if domain == parent or domain.endswith(suffix):
+                    return True
+            elif domain == entry:
+                return True
+        return False
+
+    def _check_watched_domain(
+        self, event: DNSEvent, domain_lower: str,
+    ) -> list[Alert]:
+        """Enhanced monitoring for watched domains.
+
+        Watched domains are legitimate services that could be abused as C2
+        fronting or data-exfiltration vectors (e.g., doubleclick.net, Google
+        infrastructure).  They receive all normal analysis plus:
+
+        1. First-query alert when a new client queries a watched domain
+        2. Volume spike alert when per-client hourly count exceeds threshold
+        """
+        if not self.config.watched_domains or not self._is_watched(domain_lower):
+            return []
+
+        alerts: list[Alert] = []
+
+        # --- First-query detection ---
+        if not self.store.is_domain_known(event.client, domain_lower):
+            if not self._is_duplicate_alert(
+                domain_lower, event.client, "watched_first",
+            ):
+                alerts.append(Alert(
+                    id=str(uuid.uuid4()),
+                    timestamp=event.timestamp,
+                    severity=Severity.LOW,
+                    title=f"Watched domain first query: {event.domain}",
+                    description=(
+                        f"Client {event.client} queried watched domain "
+                        f"'{event.domain}' for the first time. This domain "
+                        f"is under enhanced monitoring for potential abuse."
+                    ),
+                    source_event_type="dns",
+                    client=event.client,
+                    domain=event.domain,
+                    analyzer="dns_baseline.watched_domain",
+                    confidence=0.3,
+                    tags=["watched", "first_query"],
+                ))
+
+        # --- Per-client hourly volume tracking ---
+        current_hour = event.timestamp.hour
+        if self._watched_current_hour != current_hour:
+            self._watched_hourly_counts.clear()
+            self._watched_current_hour = current_hour
+
+        if domain_lower not in self._watched_hourly_counts:
+            self._watched_hourly_counts[domain_lower] = {}
+        client_counts = self._watched_hourly_counts[domain_lower]
+        client_counts[event.client] = client_counts.get(event.client, 0) + 1
+
+        count = client_counts[event.client]
+        if count == self.config.watched_domain_volume_threshold:
+            if not self._is_duplicate_alert(
+                domain_lower, event.client, "watched_volume",
+            ):
+                alerts.append(Alert(
+                    id=str(uuid.uuid4()),
+                    timestamp=event.timestamp,
+                    severity=Severity.MEDIUM,
+                    title=f"Watched domain volume spike: {event.domain}",
+                    description=(
+                        f"Client {event.client} made {count} queries to "
+                        f"watched domain '{event.domain}' in the current "
+                        f"hour (threshold: "
+                        f"{self.config.watched_domain_volume_threshold}). "
+                        f"This domain is under enhanced monitoring for "
+                        f"potential abuse."
+                    ),
+                    source_event_type="dns",
+                    client=event.client,
+                    domain=event.domain,
+                    analyzer="dns_baseline.watched_volume",
+                    confidence=0.5,
+                    tags=["watched", "volume_spike"],
+                ))
+
+        return alerts
+
+    def _check_new_domain(self, event: DNSEvent, domain_lower: str) -> Alert | None:
         """Check if this is a never-before-seen domain for this client."""
         if not self.store.is_domain_known(event.client, domain_lower):
             # This is a new domain - classify with LLM if available
@@ -489,7 +738,7 @@ class DNSBaselineAnalyzer:
 
         return None
 
-    def get_baseline_stats(self, client: Optional[str] = None) -> dict:
+    def get_baseline_stats(self, client: str | None = None) -> dict:
         """Get statistics about the current baseline.
 
         Args:
