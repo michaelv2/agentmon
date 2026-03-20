@@ -902,6 +902,8 @@ def listen(
         except (asyncio.CancelledError, KeyboardInterrupt):
             pass
         finally:
+            # run_forever() replaced SIGINT/SIGTERM handlers with no-ops
+            # so Ctrl+C during cleanup won't raise KeyboardInterrupt.
             if watchdog_task:
                 watchdog.stop()
                 watchdog_task.cancel()
@@ -923,12 +925,18 @@ def listen(
                 volume_anomaly_analyzer.flush()
             store.close()
             pid_path.unlink(missing_ok=True)
+            # Restore default signal handling now that cleanup is done
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.remove_signal_handler(sig)
+                except (NotImplementedError, ValueError, RuntimeError):
+                    pass
             print_stats()
 
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
-        # Print stats if we didn't get to the finally block
+        # Safety net — if KeyboardInterrupt escapes despite no-op handlers
         store.close()
         print_stats()
 

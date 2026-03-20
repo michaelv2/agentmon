@@ -412,6 +412,8 @@ class SyslogReceiver:
         stop_event = asyncio.Event()
 
         def signal_handler() -> None:
+            if stop_event.is_set():
+                return  # Already shutting down, ignore repeated signals
             logger.info("Shutdown signal received")
             stop_event.set()
 
@@ -428,10 +430,15 @@ class SyslogReceiver:
         except asyncio.CancelledError:
             pass
         finally:
-            # Remove signal handlers before stopping
+            # Replace signal handlers with no-ops instead of removing them.
+            # Removing restores the default Python SIGINT handler which raises
+            # KeyboardInterrupt — that would crash cleanup code still running
+            # in the caller's finally block (DuckDB writes, flush, etc.).
+            def _noop() -> None:
+                pass
             for sig in (signal.SIGINT, signal.SIGTERM):
                 try:
-                    loop.remove_signal_handler(sig)
+                    loop.add_signal_handler(sig, _noop)
                 except (NotImplementedError, ValueError):
                     pass
             await self.stop()
