@@ -391,6 +391,34 @@ class TestTCPBufferOverflow:
         # Buffer should be empty after overflow
         assert protocol.buffer == b""
 
+    def test_large_burst_of_newline_delimited_messages_processed(self) -> None:
+        """A burst of valid newline-delimited messages exceeding MAX_TCP_BUFFER_SIZE
+        should be processed, not discarded as overflow."""
+        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
+        from unittest.mock import MagicMock
+
+        handler = MagicMock()
+        config = SyslogConfig(protocol="tcp")
+        protocol = TCPSyslogProtocol(handler, config)
+
+        transport = MagicMock()
+        transport.get_extra_info.return_value = ("192.168.1.100", 12345)
+        protocol.connection_made(transport)
+
+        # Build a burst of valid syslog messages that exceeds the buffer limit
+        single_msg = b"<30>Jan 26 14:32:15 myhost myapp: test message\n"
+        count = (MAX_TCP_BUFFER_SIZE // len(single_msg)) + 10
+        burst = single_msg * count
+
+        assert len(burst) > MAX_TCP_BUFFER_SIZE
+
+        protocol.data_received(burst)
+
+        # All messages should be processed, connection should stay open
+        assert handler.call_count == count
+        transport.close.assert_not_called()
+        assert protocol.buffer == b""
+
 
 class TestSyslogConfig:
     """Tests for syslog configuration."""

@@ -309,17 +309,6 @@ class TCPSyslogProtocol(asyncio.Protocol):
     def data_received(self, data: bytes) -> None:
         self.buffer += data
 
-        # Guard against unbounded buffer growth (OOM protection)
-        if len(self.buffer) > MAX_TCP_BUFFER_SIZE:
-            logger.warning(
-                "TCP buffer overflow from %s: %d bytes (max %d) - closing connection",
-                self.peer, len(self.buffer), MAX_TCP_BUFFER_SIZE,
-            )
-            self.buffer = b""
-            if self.transport:
-                self.transport.close()
-            return
-
         # Process complete messages (newline-delimited for TCP syslog)
         while b"\n" in self.buffer:
             line, self.buffer = self.buffer.split(b"\n", 1)
@@ -335,6 +324,19 @@ class TCPSyslogProtocol(asyncio.Protocol):
                         self.handler(msg)
                     except Exception as e:
                         logger.error(f"Error handling syslog message: {e}")
+
+        # Guard against unbounded buffer growth (OOM protection)
+        # Check AFTER processing complete messages — a large burst of
+        # newline-delimited messages should be drained, not discarded.
+        # Only a single incomplete message (no newline) should remain.
+        if len(self.buffer) > MAX_TCP_BUFFER_SIZE:
+            logger.warning(
+                "TCP buffer overflow from %s: %d bytes (max %d) - closing connection",
+                self.peer, len(self.buffer), MAX_TCP_BUFFER_SIZE,
+            )
+            self.buffer = b""
+            if self.transport:
+                self.transport.close()
 
     def connection_lost(self, exc: Exception | None) -> None:
         logger.debug(f"TCP connection closed from {self.peer}")
