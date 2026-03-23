@@ -1,6 +1,5 @@
 """Device-to-policy mapping and lookup."""
 
-from typing import Optional
 
 from agentmon.policies.models import Device, ParentalPolicy
 
@@ -30,7 +29,7 @@ class DeviceManager:
             for ip in device.client_ips:
                 self._ip_to_device[ip] = device
 
-    def get_device(self, client_ip: str) -> Optional[Device]:
+    def get_device(self, client_ip: str) -> Device | None:
         """Look up device by client IP.
 
         Args:
@@ -41,7 +40,7 @@ class DeviceManager:
         """
         return self._ip_to_device.get(client_ip)
 
-    def get_policies(self, client_ip: str) -> Optional[tuple[Device, list[ParentalPolicy]]]:
+    def get_policies(self, client_ip: str) -> tuple[Device, list[ParentalPolicy]] | None:
         """Look up device and policies by client IP.
 
         Args:

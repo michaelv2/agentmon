@@ -58,6 +58,7 @@ class SyslogMessage:
     facility: int = 0
     severity: int = 0
     source_ip: str | None = None
+    received_at: datetime = field(default_factory=datetime.now)
 
     @property
     def facility_name(self) -> str:
@@ -285,6 +286,7 @@ class TCPSyslogProtocol(asyncio.Protocol):
         self,
         handler: MessageHandler,
         config: SyslogConfig,
+        connections: set["TCPSyslogProtocol"] | None = None,
     ) -> None:
         self.handler = handler
         self.config = config
@@ -292,6 +294,7 @@ class TCPSyslogProtocol(asyncio.Protocol):
         self.buffer = b""
         self.peer: tuple[str, int] | None = None
         self._rate_limiter = _PerIPRateLimiter(config.rate_limit_per_second)
+        self._connections = connections
 
     def connection_made(self, transport: asyncio.Transport) -> None:  # type: ignore[override]
         self.transport = transport
@@ -304,6 +307,8 @@ class TCPSyslogProtocol(asyncio.Protocol):
                 transport.close()
                 return
 
+        if self._connections is not None:
+            self._connections.add(self)
         logger.debug(f"TCP connection from {self.peer}")
 
     def data_received(self, data: bytes) -> None:
@@ -339,6 +344,8 @@ class TCPSyslogProtocol(asyncio.Protocol):
                 self.transport.close()
 
     def connection_lost(self, exc: Exception | None) -> None:
+        if self._connections is not None:
+            self._connections.discard(self)
         logger.debug(f"TCP connection closed from {self.peer}")
 
 
@@ -360,6 +367,7 @@ class SyslogReceiver:
         self.handler = handler
         self._udp_transport: asyncio.DatagramTransport | None = None
         self._tcp_server: asyncio.Server | None = None
+        self._tcp_connections: set[TCPSyslogProtocol] = set()
         self._running = False
 
     async def start(self) -> None:
@@ -376,8 +384,9 @@ class SyslogReceiver:
             logger.info(f"Syslog UDP listening on {self.config.bind_address}:{self.config.port}")
 
         if self.config.protocol in ("tcp", "both"):
+            conns = self._tcp_connections
             self._tcp_server = await loop.create_server(
-                lambda: TCPSyslogProtocol(self.handler, self.config),
+                lambda: TCPSyslogProtocol(self.handler, self.config, conns),
                 self.config.bind_address,
                 self.config.port,
             )
@@ -394,6 +403,11 @@ class SyslogReceiver:
 
         if self._tcp_server:
             self._tcp_server.close()
+            # Close all active client connections so wait_closed() returns
+            # immediately instead of blocking until clients disconnect.
+            for proto in list(self._tcp_connections):
+                if proto.transport:
+                    proto.transport.close()
             await self._tcp_server.wait_closed()
             self._tcp_server = None
             logger.info("Syslog TCP stopped")

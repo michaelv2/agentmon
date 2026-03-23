@@ -1,7 +1,7 @@
 """Tests for the reassessment feature."""
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -29,7 +29,7 @@ def store() -> EventStore:
 @pytest.fixture
 def store_with_data(store: EventStore) -> EventStore:
     """EventStore populated with alerts and DNS events for testing."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Insert alerts — some domains have many alerts (FP candidates)
     alerts = [
@@ -37,7 +37,7 @@ def store_with_data(store: EventStore) -> EventStore:
             id=f"alert-fp-{i}",
             timestamp=now,
             severity=Severity.LOW,
-            title=f"New domain: noisy-domain.com",
+            title="New domain: noisy-domain.com",
             description="First seen",
             source_event_type="dns",
             domain="noisy-domain.com",
@@ -51,7 +51,7 @@ def store_with_data(store: EventStore) -> EventStore:
             id=f"alert-nonfp-{i}",
             timestamp=now,
             severity=Severity.MEDIUM,
-            title=f"Suspicious domain: bad-domain.xyz",
+            title="Suspicious domain: bad-domain.xyz",
             description="High entropy",
             source_event_type="dns",
             domain="bad-domain.xyz",
@@ -65,7 +65,7 @@ def store_with_data(store: EventStore) -> EventStore:
             id=f"alert-mixed-{i}",
             timestamp=now,
             severity=Severity.LOW,
-            title=f"New domain: mixed-domain.net",
+            title="New domain: mixed-domain.net",
             description="First seen",
             source_event_type="dns",
             domain="mixed-domain.net",

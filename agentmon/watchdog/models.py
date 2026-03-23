@@ -7,7 +7,7 @@ for potential Rust migration.
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -129,5 +129,5 @@ class WatchdogReport:
     cycle_number: int
     snapshot: OODASnapshot
     concerns: list[OODAConcern]
-    raw_llm_response: Optional[str] = None
+    raw_llm_response: str | None = None
     action_taken: str = "none"

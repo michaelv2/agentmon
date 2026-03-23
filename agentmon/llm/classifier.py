@@ -8,11 +8,10 @@ import json
 import logging
 import os
 import re
-import requests
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
+import requests
 from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
@@ -130,7 +129,7 @@ class ClassificationResult:
     confidence: float  # 0.0 to 1.0
     reasoning: str
     escalated: bool = False  # True if escalation model was used
-    triage_category: Optional[str] = None  # Original triage result if escalated
+    triage_category: str | None = None  # Original triage result if escalated
 
 
 @dataclass
@@ -183,7 +182,7 @@ class DomainClassifier:
 
     def __init__(
         self,
-        config: Optional[LLMConfig] = None,
+        config: LLMConfig | None = None,
         cache_ttl: int = DEFAULT_CACHE_TTL,
         cache_size: int = DEFAULT_CACHE_SIZE,
         vt_client=None,
@@ -359,7 +358,7 @@ class DomainClassifier:
         query_type: str,
         blocked: bool,
         vt_context: str = "",
-    ) -> Optional[ClassificationResult]:
+    ) -> ClassificationResult | None:
         """Query a specific model for classification.
 
         Args:
@@ -404,7 +403,7 @@ class DomainClassifier:
             logger.debug(f"{model} classification failed for {domain}: {e}")
             return None
 
-    def _parse_response(self, domain: str, content: str) -> Optional[ClassificationResult]:
+    def _parse_response(self, domain: str, content: str) -> ClassificationResult | None:
         """Parse LLM response into ClassificationResult."""
         try:
             content = content.strip()

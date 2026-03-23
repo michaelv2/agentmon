@@ -7,7 +7,6 @@ to facilitate a potential Rust rewrite later.
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 
 class Severity(Enum):
@@ -28,8 +27,8 @@ class DNSEvent:
     domain: str
     query_type: str  # A, AAAA, CNAME, etc.
     blocked: bool
-    upstream: Optional[str] = None  # Which upstream resolver was used
-    response_time_ms: Optional[float] = None
+    upstream: str | None = None  # Which upstream resolver was used
+    response_time_ms: float | None = None
 
     def domain_parts(self) -> list[str]:
         """Split domain into parts for analysis."""
@@ -48,8 +47,8 @@ class ConnectionEvent:
     protocol: str  # tcp, udp, icmp
     bytes_sent: int = 0
     bytes_recv: int = 0
-    duration_seconds: Optional[float] = None
-    dns_domain: Optional[str] = None  # Correlated DNS lookup if known
+    duration_seconds: float | None = None
+    dns_domain: str | None = None  # Correlated DNS lookup if known
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +62,10 @@ class ProcessNetworkEvent:
     exe_path: str
     user: str
     cmdline: str
-    parent_pid: Optional[int]
-    parent_name: Optional[str]
+    parent_pid: int | None
+    parent_name: str | None
     connection: ConnectionEvent
-    authorized: Optional[bool] = None  # None if not yet checked
+    authorized: bool | None = None  # None if not yet checked
 
 
 @dataclass(slots=True)
@@ -79,16 +78,16 @@ class Alert:
     title: str
     description: str
     source_event_type: str  # "dns", "connection", "process"
-    source_event_id: Optional[str] = None
-    client: Optional[str] = None
-    domain: Optional[str] = None
-    dst_ip: Optional[str] = None
-    process_name: Optional[str] = None
+    source_event_id: str | None = None
+    client: str | None = None
+    domain: str | None = None
+    dst_ip: str | None = None
+    process_name: str | None = None
 
     # Analysis metadata
     analyzer: str = ""  # Which analyzer generated this
     confidence: float = 0.0  # 0.0 to 1.0
-    llm_analysis: Optional[str] = None  # If escalated to LLM
+    llm_analysis: str | None = None  # If escalated to LLM
 
     # Tracking
     acknowledged: bool = False

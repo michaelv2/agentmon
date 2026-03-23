@@ -1,7 +1,6 @@
 """Data models for parental control policies."""
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from agentmon.models import Severity
 
@@ -20,7 +19,7 @@ class TimeRule:
     start: str  # "15:00"
     end: str  # "17:00"
     days: list[str]  # ["mon", "tue", "wed", "thu", "fri"]
-    allowed_categories: Optional[list[str]] = None
+    allowed_categories: list[str] | None = None
     block_all: bool = False
 
 

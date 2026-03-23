@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import tomli
 
@@ -41,7 +41,7 @@ def get_config_search_paths() -> list[Path]:
     ]
 
 
-def find_config_file() -> Optional[Path]:
+def find_config_file() -> Path | None:
     """Find the first existing config file."""
     for path in get_config_search_paths():
         if path.exists():
@@ -61,6 +61,10 @@ class Config:
     syslog_protocol: str = "tcp"
     syslog_bind_address: str = "127.0.0.1"  # Localhost only by default for security
     syslog_allowed_ips: list[str] = field(default_factory=list)
+    syslog_lag_enabled: bool = True
+    syslog_lag_threshold_seconds: int = 300  # 5 minutes
+    syslog_lag_severity: str = "medium"
+    syslog_lag_cooldown_seconds: int = 300  # one alert per source per 5 min
 
     # Analyzer
     entropy_threshold: float = 3.5
@@ -93,6 +97,11 @@ class Config:
     ocsp_spike_threshold: int = 100  # queries per client per hour
     ocsp_spike_severity: str = "medium"
 
+    # Per-domain query rate spike detection
+    query_rate_spike_enabled: bool = True
+    query_rate_spike_threshold: int = 100  # queries per client per domain per hour
+    query_rate_spike_severity: str = "medium"
+
     # Watched domains: enhanced monitoring for potential C2 fronting / exfil
     watched_domains: list[str] = field(default_factory=list)
     watched_domain_volume_threshold: int = 50  # queries per client per hour
@@ -105,14 +114,14 @@ class Config:
     llm_downgrade_confidence: float = 0.8
 
     # VirusTotal
-    virustotal_api_key: Optional[str] = None
+    virustotal_api_key: str | None = None
 
     # Alerting
     min_severity: str = "low"
 
     # Slack
     slack_enabled: bool = False
-    slack_webhook_url: Optional[str] = None
+    slack_webhook_url: str | None = None
     slack_min_severity: str = "medium"
 
     # Parental Controls
@@ -130,7 +139,7 @@ class Config:
 
     # Client Identity Resolution
     resolver_enabled: bool = False
-    resolver_dns_server: Optional[str] = None
+    resolver_dns_server: str | None = None
     resolver_cache_ttl: int = 3600  # 1 hour
     resolver_strip_suffix: bool = True
     resolver_mappings: dict[str, str] = field(default_factory=dict)
@@ -170,10 +179,10 @@ class Config:
     watchdog_interval_minutes: int = 15
     watchdog_model: str = "claude-sonnet-4-6"
     watchdog_max_tokens_per_cycle: int = 4096
-    watchdog_window_minutes: Optional[int] = None
+    watchdog_window_minutes: int | None = None
 
     # Anthropic (Claude) API
-    anthropic_api_key: Optional[str] = None
+    anthropic_api_key: str | None = None
 
 
 # Allowed parent directories for database files.
@@ -260,7 +269,7 @@ def _verify_config_integrity(config_path: Path, raw_bytes: bytes) -> None:
         )
 
 
-def load_config(config_path: Optional[Path] = None) -> Config:
+def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file.
 
     Args:
@@ -308,6 +317,14 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.syslog_bind_address = syslog["bind_address"]
         if "allowed_ips" in syslog:
             config.syslog_allowed_ips = _validate_allowed_ips(syslog["allowed_ips"])
+        if "lag_detection_enabled" in syslog:
+            config.syslog_lag_enabled = syslog["lag_detection_enabled"]
+        if "lag_threshold_seconds" in syslog:
+            config.syslog_lag_threshold_seconds = syslog["lag_threshold_seconds"]
+        if "lag_severity" in syslog:
+            config.syslog_lag_severity = syslog["lag_severity"]
+        if "lag_alert_cooldown_seconds" in syslog:
+            config.syslog_lag_cooldown_seconds = syslog["lag_alert_cooldown_seconds"]
 
     # Analyzer section
     if "analyzer" in data:
@@ -344,6 +361,12 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config.watched_domains = analyzer["watched_domains"]
         if "watched_domain_volume_threshold" in analyzer:
             config.watched_domain_volume_threshold = analyzer["watched_domain_volume_threshold"]
+        if "query_rate_spike_enabled" in analyzer:
+            config.query_rate_spike_enabled = analyzer["query_rate_spike_enabled"]
+        if "query_rate_spike_threshold" in analyzer:
+            config.query_rate_spike_threshold = analyzer["query_rate_spike_threshold"]
+        if "query_rate_spike_severity" in analyzer:
+            config.query_rate_spike_severity = analyzer["query_rate_spike_severity"]
 
     # LLM section
     if "llm" in data:
@@ -606,8 +629,10 @@ _TUNABLE_FIELDS: set[str] = {
     "dga_min_clients_suppress",
     "trusted_infrastructure",
     "ocsp_spike_threshold",
+    "query_rate_spike_threshold",
     "watched_domains",
     "watched_domain_volume_threshold",
+    "syslog_lag_threshold_seconds",
     "parental_devices",
     "parental_policies",
 }
@@ -674,7 +699,7 @@ def reload_tunable_config(
     return new, changes
 
 
-def append_to_allowlist(domain: str, config_path: Optional[Path] = None) -> Path:
+def append_to_allowlist(domain: str, config_path: Path | None = None) -> Path:
     """Append a domain to the allowlist in the TOML config file.
 
     Reads the existing config, adds the domain to [analyzer] allowlist,

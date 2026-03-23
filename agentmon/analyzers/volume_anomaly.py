@@ -13,10 +13,10 @@ Complements DNSBaselineAnalyzer (what) and DeviceActivityAnalyzer (when) by
 detecting how much.
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import logging
 import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from agentmon.models import Alert, DNSEvent, Severity
 from agentmon.storage import EventStore
@@ -112,7 +112,7 @@ class VolumeAnomalyAnalyzer:
             return False
 
         if first_seen.tzinfo is None:
-            first_seen = first_seen.replace(tzinfo=timezone.utc)
+            first_seen = first_seen.replace(tzinfo=UTC)
 
         now = datetime.now(first_seen.tzinfo)
         days_observed = (now - first_seen).days
@@ -273,7 +273,7 @@ class VolumeAnomalyAnalyzer:
 
         return Alert(
             id=str(uuid.uuid4()),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             severity=self.config.spike_severity,
             title=f"Query rate spike: {device_name} at {hour_str}",
             description=(
@@ -302,7 +302,7 @@ class VolumeAnomalyAnalyzer:
 
         return Alert(
             id=str(uuid.uuid4()),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             severity=self.config.diversity_severity,
             title=f"Domain diversity burst: {device_name} at {hour_str}",
             description=(
@@ -330,7 +330,7 @@ class VolumeAnomalyAnalyzer:
 
         return Alert(
             id=str(uuid.uuid4()),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             severity=self.config.sustained_severity,
             title=f"Sustained elevated activity: {device_name} for {consecutive_hours}h",
             description=(
@@ -355,7 +355,7 @@ class VolumeAnomalyAnalyzer:
         if not self._hourly_query_counts and not self._hourly_domain_sets:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for client in set(self._hourly_query_counts.keys()) | set(self._hourly_domain_sets.keys()):
             query_count = self._hourly_query_counts.get(client, 0)
             domain_count = len(self._hourly_domain_sets.get(client, set()))

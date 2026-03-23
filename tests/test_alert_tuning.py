@@ -7,14 +7,14 @@
 5. Watched domains — enhanced monitoring for C2 fronting / exfil blind spots
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from agentmon.analyzers.dns_baseline import (
-    AnalyzerConfig,
     DEFAULT_DEDUP_WINDOW,
+    AnalyzerConfig,
     DNSBaselineAnalyzer,
 )
 from agentmon.analyzers.entropy import (
@@ -24,7 +24,6 @@ from agentmon.analyzers.entropy import (
 )
 from agentmon.models import DNSEvent
 from agentmon.storage.db import EventStore
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -36,7 +35,7 @@ def _event(
     timestamp: datetime | None = None,
 ) -> DNSEvent:
     return DNSEvent(
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(UTC),
         client=client,
         domain=domain,
         query_type="A",
@@ -144,7 +143,7 @@ class TestQueryFrequencyThreshold:
 
         # Pre-populate baseline: 4 clients each queried this domain
         dga_domain = "a8k3m9d7f2x1z5q4w8.notcdn.com"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for i in range(4):
             client = f"192.168.1.{10 + i}"
             for _ in range(5):
@@ -168,7 +167,7 @@ class TestQueryFrequencyThreshold:
 
         # Only 1 client, 2 queries — well below thresholds
         dga_domain = "a8k3m9d7f2x1z5q4w8.notcdn.com"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         store.update_domain_baseline("192.168.1.10", dga_domain, now)
         store.update_domain_baseline("192.168.1.10", dga_domain, now)
 
@@ -188,7 +187,7 @@ class TestQueryFrequencyThreshold:
         analyzer = DNSBaselineAnalyzer(store, config)
 
         dga_domain = "a8k3m9d7f2x1z5q4w8.notcdn.com"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for _ in range(20):
             store.update_domain_baseline("192.168.1.10", dga_domain, now)
 
@@ -200,7 +199,7 @@ class TestQueryFrequencyThreshold:
 
     def test_get_domain_popularity(self, store: EventStore) -> None:
         """EventStore.get_domain_popularity returns correct counts."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         store.update_domain_baseline("client-a", "test.com", now)
         store.update_domain_baseline("client-a", "test.com", now)
         store.update_domain_baseline("client-b", "test.com", now)
@@ -278,7 +277,7 @@ class TestOCSPSpikeDetection:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         ocsp_alerts = []
         for i in range(6):
             event = _event("ocsp2.apple.com", timestamp=now)
@@ -301,7 +300,7 @@ class TestOCSPSpikeDetection:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for _ in range(10):
             event = _event("ocsp2.apple.com", timestamp=now)
             alerts = analyzer.analyze_event(event)
@@ -319,7 +318,7 @@ class TestOCSPSpikeDetection:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for _ in range(5):
             event = _event("api.example.com", timestamp=now)
             alerts = analyzer.analyze_event(event)
@@ -337,7 +336,7 @@ class TestOCSPSpikeDetection:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # 2 queries from each of 2 clients — neither hits threshold of 3
         for client in ["192.168.1.10", "192.168.1.20"]:
             for _ in range(2):
@@ -357,7 +356,7 @@ class TestOCSPSpikeDetection:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for _ in range(5):
             event = _event("ocsp2.apple.com", timestamp=now)
             alerts = analyzer.analyze_event(event)
@@ -376,13 +375,13 @@ class TestOCSPSpikeDetection:
         analyzer = DNSBaselineAnalyzer(store, config)
 
         # 2 queries at hour 10
-        hour10 = datetime(2024, 1, 1, 10, 30, tzinfo=timezone.utc)
+        hour10 = datetime(2024, 1, 1, 10, 30, tzinfo=UTC)
         for _ in range(2):
             event = _event("ocsp2.apple.com", timestamp=hour10)
             analyzer.analyze_event(event)
 
         # Switch to hour 11 — counter should reset
-        hour11 = datetime(2024, 1, 1, 11, 5, tzinfo=timezone.utc)
+        hour11 = datetime(2024, 1, 1, 11, 5, tzinfo=UTC)
         ocsp_alerts = []
         for _ in range(4):
             event = _event("ocsp2.apple.com", timestamp=hour11)
@@ -427,7 +426,7 @@ class TestWatchedDomains:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # First query → alert
         event = _event("clients4.google.com", timestamp=now)
         first_alerts = analyzer.analyze_event(event)
@@ -455,7 +454,7 @@ class TestWatchedDomains:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         volume_alerts = []
         for _ in range(6):
             event = _event("static.doubleclick.net", timestamp=now)
@@ -477,7 +476,7 @@ class TestWatchedDomains:
         )
         analyzer = DNSBaselineAnalyzer(store, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # 3 queries from each of 2 clients — neither hits threshold of 4
         for client in ["192.168.1.10", "192.168.1.20"]:
             for _ in range(3):
@@ -555,14 +554,14 @@ class TestWatchedDomains:
         analyzer = DNSBaselineAnalyzer(store, config)
 
         # 2 queries at hour 14
-        h14 = datetime(2024, 1, 1, 14, 0, tzinfo=timezone.utc)
+        h14 = datetime(2024, 1, 1, 14, 0, tzinfo=UTC)
         for _ in range(2):
             analyzer.analyze_event(
                 _event("static.doubleclick.net", timestamp=h14)
             )
 
         # Switch to hour 15 — counter should reset
-        h15 = datetime(2024, 1, 1, 15, 0, tzinfo=timezone.utc)
+        h15 = datetime(2024, 1, 1, 15, 0, tzinfo=UTC)
         volume_alerts = []
         for _ in range(4):
             alerts = analyzer.analyze_event(
@@ -574,3 +573,143 @@ class TestWatchedDomains:
 
         # Should fire at count=3 within hour 15 only
         assert len(volume_alerts) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. Per-Domain Query Rate Spike Detection
+# ---------------------------------------------------------------------------
+
+class TestQueryRateSpike:
+    """Detect per-domain query rate spikes from a single client."""
+
+    def test_fires_at_threshold(self, store: EventStore) -> None:
+        """Should alert when client hits query rate threshold."""
+        config = AnalyzerConfig(
+            known_bad_patterns=[],
+            query_rate_spike_enabled=True,
+            query_rate_spike_threshold=5,
+        )
+        analyzer = DNSBaselineAnalyzer(store, config)
+
+        now = datetime.now(UTC)
+        rate_alerts = []
+        for _ in range(6):
+            alerts = analyzer.analyze_event(
+                _event("suspicious.example.com", timestamp=now)
+            )
+            rate_alerts.extend(
+                a for a in alerts if a.analyzer == "dns_baseline.query_rate_spike"
+            )
+
+        assert len(rate_alerts) == 1
+        assert "Query rate spike" in rate_alerts[0].title
+        assert "beaconing" in rate_alerts[0].description
+
+    def test_not_fired_below_threshold(self, store: EventStore) -> None:
+        """Should not alert below threshold."""
+        config = AnalyzerConfig(
+            known_bad_patterns=[],
+            query_rate_spike_enabled=True,
+            query_rate_spike_threshold=100,
+        )
+        analyzer = DNSBaselineAnalyzer(store, config)
+
+        now = datetime.now(UTC)
+        for _ in range(10):
+            alerts = analyzer.analyze_event(
+                _event("normal.example.com", timestamp=now)
+            )
+            rate_alerts = [
+                a for a in alerts if a.analyzer == "dns_baseline.query_rate_spike"
+            ]
+            assert len(rate_alerts) == 0
+
+    def test_per_client_isolation(self, store: EventStore) -> None:
+        """Different clients should have independent counters."""
+        config = AnalyzerConfig(
+            known_bad_patterns=[],
+            query_rate_spike_enabled=True,
+            query_rate_spike_threshold=3,
+        )
+        analyzer = DNSBaselineAnalyzer(store, config)
+
+        now = datetime.now(UTC)
+        # Two events from client A, two from client B — neither hits threshold
+        for client in ["192.168.1.10", "192.168.1.20"]:
+            for _ in range(2):
+                alerts = analyzer.analyze_event(
+                    _event("target.example.com", client=client, timestamp=now)
+                )
+                rate_alerts = [
+                    a for a in alerts if a.analyzer == "dns_baseline.query_rate_spike"
+                ]
+                assert len(rate_alerts) == 0
+
+    def test_disabled(self, store: EventStore) -> None:
+        """Should not fire when disabled."""
+        config = AnalyzerConfig(
+            known_bad_patterns=[],
+            query_rate_spike_enabled=False,
+            query_rate_spike_threshold=1,
+        )
+        analyzer = DNSBaselineAnalyzer(store, config)
+
+        now = datetime.now(UTC)
+        for _ in range(5):
+            alerts = analyzer.analyze_event(
+                _event("example.com", timestamp=now)
+            )
+            rate_alerts = [
+                a for a in alerts if a.analyzer == "dns_baseline.query_rate_spike"
+            ]
+            assert len(rate_alerts) == 0
+
+    def test_hour_boundary_resets(self, store: EventStore) -> None:
+        """Counters should reset on hour boundary."""
+        config = AnalyzerConfig(
+            known_bad_patterns=[],
+            query_rate_spike_enabled=True,
+            query_rate_spike_threshold=3,
+        )
+        analyzer = DNSBaselineAnalyzer(store, config)
+
+        h14 = datetime(2024, 1, 1, 14, 0, tzinfo=UTC)
+        h15 = datetime(2024, 1, 1, 15, 0, tzinfo=UTC)
+
+        # 2 events in hour 14
+        for _ in range(2):
+            analyzer.analyze_event(_event("target.example.com", timestamp=h14))
+
+        # 2 events in hour 15 — counter reset, so total is 2 not 4
+        rate_alerts = []
+        for _ in range(2):
+            alerts = analyzer.analyze_event(
+                _event("target.example.com", timestamp=h15)
+            )
+            rate_alerts.extend(
+                a for a in alerts if a.analyzer == "dns_baseline.query_rate_spike"
+            )
+
+        assert len(rate_alerts) == 0
+
+    def test_per_domain_isolation(self, store: EventStore) -> None:
+        """Different domains should have independent counters."""
+        config = AnalyzerConfig(
+            known_bad_patterns=[],
+            query_rate_spike_enabled=True,
+            query_rate_spike_threshold=3,
+        )
+        analyzer = DNSBaselineAnalyzer(store, config)
+
+        now = datetime.now(UTC)
+        for _ in range(2):
+            analyzer.analyze_event(_event("a.example.com", timestamp=now))
+            analyzer.analyze_event(_event("b.example.com", timestamp=now))
+
+        # Neither domain hit threshold of 3
+        all_alerts = analyzer.analyze_event(_event("a.example.com", timestamp=now))
+        rate_alerts = [
+            a for a in all_alerts if a.analyzer == "dns_baseline.query_rate_spike"
+        ]
+        # Third event for a.example.com — should fire
+        assert len(rate_alerts) == 1

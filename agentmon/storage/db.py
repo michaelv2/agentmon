@@ -12,15 +12,13 @@ import os
 import shutil
 import stat
 import tempfile
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Optional
 import uuid
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import duckdb
 
-from agentmon.models import DNSEvent, ConnectionEvent, Alert, Severity
-
+from agentmon.models import Alert, ConnectionEvent, DNSEvent, Severity
 
 SCHEMA_VERSION = 4
 
@@ -37,8 +35,8 @@ class EventStore:
         """
         self.db_path = db_path
         self.read_only = read_only
-        self._conn: Optional[duckdb.DuckDBPyConnection] = None
-        self._temp_db_path: Optional[Path] = None
+        self._conn: duckdb.DuckDBPyConnection | None = None
+        self._temp_db_path: Path | None = None
 
     def connect(self) -> None:
         """Open database connection and ensure schema exists."""
@@ -347,7 +345,7 @@ class EventStore:
             True if a query was updated, False otherwise
         """
         # Use datetime arithmetic instead of f-string interpolation for safety
-        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+        cutoff_time = datetime.now(UTC) - timedelta(seconds=max_age_seconds)
         result = self.conn.execute("""
             UPDATE dns_events
             SET blocked = TRUE
@@ -519,7 +517,7 @@ class EventStore:
 
     def get_domain_first_seen(
         self, client: str, domain: str
-    ) -> Optional[datetime]:
+    ) -> datetime | None:
         """Get when a domain was first seen for a client."""
         result = self.conn.execute("""
             SELECT first_seen FROM domain_baseline
@@ -565,7 +563,7 @@ class EventStore:
     def get_client_stats(self, hours: int = 24) -> list[dict]:
         """Get DNS query statistics per client for the last N hours."""
         # Use datetime arithmetic instead of f-string interpolation for safety
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff_time = datetime.now(UTC) - timedelta(hours=hours)
         result = self.conn.execute("""
             SELECT
                 client,
@@ -606,7 +604,7 @@ class EventStore:
             was_active: Whether the device exceeded the activity threshold
         """
         active_increment = 1 if was_active else 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.conn.execute("""
             INSERT INTO device_activity_baseline
                 (client, day_of_week, hour_of_day, query_count, active_count, sample_count, last_updated)
@@ -623,7 +621,7 @@ class EventStore:
         client: str,
         day_of_week: int,
         hour_of_day: int,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Get baseline for a specific time slot.
 
         Args:
@@ -650,7 +648,7 @@ class EventStore:
             "last_updated": result[3],
         }
 
-    def get_device_first_activity(self, client: str) -> Optional[datetime]:
+    def get_device_first_activity(self, client: str) -> datetime | None:
         """Get when a device was first observed (earliest last_updated).
 
         Used to determine if the device has passed the learning period.
@@ -759,7 +757,7 @@ class EventStore:
             query_count: Number of queries observed this hour.
             domain_count: Number of unique domains observed this hour.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         existing = self.get_volume_baseline(client, day_of_week, hour_of_day)
 
         if existing is None:
@@ -805,7 +803,7 @@ class EventStore:
         client: str,
         day_of_week: int,
         hour_of_day: int,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Get volume baseline for a specific time slot.
 
         Returns:
@@ -888,7 +886,7 @@ class EventStore:
 
         return (z_score > sigma, z_score)
 
-    def get_volume_first_observation(self, client: str) -> Optional[datetime]:
+    def get_volume_first_observation(self, client: str) -> datetime | None:
         """Get when a device was first observed in volume baseline.
 
         Used to determine if the device has passed the learning period.
@@ -907,11 +905,11 @@ class EventStore:
         snapshot_json: str,
         concerns_json: str,
         action_taken: str,
-        api_latency_ms: Optional[float] = None,
-        input_tokens: Optional[int] = None,
-        output_tokens: Optional[int] = None,
-        estimated_cost_usd: Optional[float] = None,
-        model_used: Optional[str] = None,
+        api_latency_ms: float | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        estimated_cost_usd: float | None = None,
+        model_used: str | None = None,
     ) -> None:
         """Insert a watchdog observation audit record."""
         self.conn.execute("""
@@ -1034,9 +1032,9 @@ class EventStore:
         """
         conn_days = connection_events_days if connection_events_days is not None else dns_events_days
 
-        dns_cutoff = datetime.now(timezone.utc) - timedelta(days=dns_events_days)
-        alerts_cutoff = datetime.now(timezone.utc) - timedelta(days=alerts_days)
-        conn_cutoff = datetime.now(timezone.utc) - timedelta(days=conn_days)
+        dns_cutoff = datetime.now(UTC) - timedelta(days=dns_events_days)
+        alerts_cutoff = datetime.now(UTC) - timedelta(days=alerts_days)
+        conn_cutoff = datetime.now(UTC) - timedelta(days=conn_days)
 
         # DuckDB DELETE doesn't reliably return rowcount, so count first
         dns_row = self.conn.execute(

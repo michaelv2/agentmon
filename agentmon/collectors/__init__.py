@@ -2,8 +2,8 @@
 
 from agentmon.collectors.pihole import PiholeCollector
 from agentmon.collectors.pihole_log import PiholeLogCollector
+from agentmon.collectors.syslog_parsers import OpenWRTParser, PiholeParser, route_message
 from agentmon.collectors.syslog_receiver import SyslogConfig, SyslogReceiver
-from agentmon.collectors.syslog_parsers import PiholeParser, OpenWRTParser, route_message
 
 __all__ = [
     "PiholeCollector",

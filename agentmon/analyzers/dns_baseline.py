@@ -91,6 +91,11 @@ class AnalyzerConfig:
     ocsp_spike_threshold: int = 100  # queries per client per hour
     ocsp_spike_severity: str = "medium"
 
+    # Per-domain query rate spike detection (generalized OCSP spike)
+    query_rate_spike_enabled: bool = True
+    query_rate_spike_threshold: int = 100  # queries per client per domain per hour
+    query_rate_spike_severity: str = "medium"
+
     # Watched domains: enhanced monitoring for domains that are legitimate
     # but could be abused as C2 fronting or data-exfiltration vectors.
     # Supports exact match and wildcard suffix ("*.doubleclick.net").
@@ -139,6 +144,10 @@ class DNSBaselineAnalyzer:
         self._watched_hourly_counts: dict[str, dict[str, int]] = {}
         self._watched_current_hour: int | None = None
 
+        # Per-domain query rate spike: per-client per-domain hourly counters
+        self._rate_hourly_counts: dict[str, dict[str, int]] = {}
+        self._rate_current_hour: int | None = None
+
         # Initialize LLM classifier if enabled
         if self.config.llm_enabled:
             self._init_classifier()
@@ -165,19 +174,6 @@ class DNSBaselineAnalyzer:
             logger.warning(f"Failed to initialize LLM classifier: {e}")
             self._classifier_available = False
 
-    def _classify_domain(self, event: DNSEvent) -> str | None:
-        """Classify a domain using the LLM.
-
-        Returns the classification as a string, or None if unavailable.
-        """
-        result = self._classify_domain_full(event)
-        if result is None:
-            return None
-        escalation_note = ""
-        if result.escalated and result.triage_category:
-            escalation_note = f" [escalated from {result.triage_category}]"
-        return f"{result.category.value} (confidence: {result.confidence:.2f}){escalation_note}: {result.reasoning}"
-
     def _classify_domain_full(self, event: DNSEvent):
         """Classify a domain using the LLM.
 
@@ -198,54 +194,63 @@ class DNSBaselineAnalyzer:
             return None
 
     def _enrich_alert_with_llm(self, alert: Alert, event: DNSEvent) -> None:
-        """Enrich an alert with LLM classification if available."""
+        """Enrich an alert with LLM classification and adjust severity.
+
+        Single path for all LLM-based alert enrichment:
+        - Adds llm_analysis text
+        - Upgrades severity for malicious/suspicious classifications
+        - Downgrades severity for benign/noise classifications (if enabled)
+        """
         if not self.config.llm_classify_alerts or alert.llm_analysis:
             return
 
         result = self._classify_domain_full(event)
-        if result:
-            # Format analysis text (existing behavior)
-            escalation_note = ""
-            if result.escalated and result.triage_category:
-                escalation_note = f" [escalated from {result.triage_category}]"
-            alert.llm_analysis = (
-                f"{result.category.value} (confidence: {result.confidence:.2f})"
-                f"{escalation_note}: {result.reasoning}"
-            )
-
-            # Consider severity downgrade based on LLM classification
-            self._maybe_downgrade_severity(alert, result)
-
-    def _maybe_downgrade_severity(self, alert: Alert, result) -> None:
-        """Downgrade alert severity if LLM indicates benign domain.
-
-        Only downgrades when LLM classification indicates the domain is
-        legitimate (benign, CDN, cloud provider, API service) or low-risk
-        (advertising, tracking) with sufficient confidence.
-        """
-        if not self.config.llm_downgrade_enabled:
+        if not result:
             return
 
-        # Require high confidence or escalation for downgrade
-        if result.confidence < self.config.llm_downgrade_confidence:
-            if not result.escalated:
-                return
+        # Format analysis text
+        escalation_note = ""
+        if result.escalated and result.triage_category:
+            escalation_note = f" [escalated from {result.triage_category}]"
+        alert.llm_analysis = (
+            f"{result.category.value} (confidence: {result.confidence:.2f})"
+            f"{escalation_note}: {result.reasoning}"
+        )
 
+        # Adjust severity based on structured category
         category = result.category.value
         original_severity = alert.severity
 
-        if category in BENIGN_CATEGORIES:
-            alert.severity = Severity.INFO
-        elif category in NOISE_CATEGORIES:
-            alert.severity = Severity.LOW
-        else:
-            return  # No downgrade for suspicious/malicious/unknown
+        # Upgrade for threats
+        if category in ("likely_malicious", "dga"):
+            alert.severity = Severity.HIGH
+            alert.confidence = max(alert.confidence, 0.8)
+        elif category == "suspicious":
+            alert.severity = Severity.MEDIUM
+            alert.confidence = max(alert.confidence, 0.6)
+        # Downgrade for benign/noise (requires confidence threshold)
+        elif self.config.llm_downgrade_enabled and (
+            result.confidence >= self.config.llm_downgrade_confidence
+            or result.escalated
+        ):
+            if category in BENIGN_CATEGORIES:
+                alert.severity = Severity.INFO
+            elif category in NOISE_CATEGORIES:
+                alert.severity = Severity.LOW
 
         if alert.severity != original_severity:
-            alert.description += f" [LLM downgraded: {original_severity.value} → {alert.severity.value}]"
+            _SEVERITY_ORDER = [Severity.INFO, Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+            direction = (
+                "downgraded"
+                if _SEVERITY_ORDER.index(alert.severity) < _SEVERITY_ORDER.index(original_severity)
+                else "upgraded"
+            )
+            alert.description += (
+                f" [LLM {direction}: {original_severity.value} → {alert.severity.value}]"
+            )
             logger.info(
-                f"Downgraded {alert.domain}: {original_severity.value} → {alert.severity.value} "
-                f"(LLM: {category}, conf={result.confidence:.2f})"
+                f"{direction.title()} {alert.domain}: {original_severity.value} → "
+                f"{alert.severity.value} (LLM: {category}, conf={result.confidence:.2f})"
             )
 
     def _is_duplicate_alert(self, domain: str, client: str, alert_type: str) -> bool:
@@ -320,6 +325,12 @@ class DNSBaselineAnalyzer:
                 self._enrich_alert_with_llm(ocsp_alert, event)
                 alerts.append(ocsp_alert)
 
+        # Check 2.6: Per-domain query rate spike
+        rate_alert = self._check_query_rate_spike(event, domain_lower)
+        if rate_alert:
+            if not self._is_duplicate_alert(domain_lower, event.client, "rate_spike"):
+                alerts.append(rate_alert)
+
         # Check 2.7: Watched domain enhanced monitoring
         watched_alerts = self._check_watched_domain(event, domain_lower)
         alerts.extend(watched_alerts)
@@ -329,7 +340,6 @@ class DNSBaselineAnalyzer:
             new_domain_alert = self._check_new_domain(event, domain_lower)
             if new_domain_alert:
                 if not self._is_duplicate_alert(domain_lower, event.client, "new_domain"):
-                    # LLM analysis already added in _check_new_domain
                     alerts.append(new_domain_alert)
 
         # Always update baseline (after checks, so we can detect "new")
@@ -599,6 +609,59 @@ class DNSBaselineAnalyzer:
 
         return None
 
+    def _check_query_rate_spike(
+        self, event: DNSEvent, domain_lower: str,
+    ) -> Alert | None:
+        """Check for per-domain query rate spikes from a single client.
+
+        Generalized form of OCSP spike detection: any client+domain pair
+        exceeding the hourly threshold fires an alert.  Catches beaconing,
+        DNS tunneling, runaway resolvers, and forwarding loops.
+        """
+        if not self.config.query_rate_spike_enabled:
+            return None
+
+        # Reset counters on hour boundary (based on event time)
+        current_hour = event.timestamp.hour
+        if self._rate_current_hour != current_hour:
+            self._rate_hourly_counts.clear()
+            self._rate_current_hour = current_hour
+
+        # Increment counter
+        if domain_lower not in self._rate_hourly_counts:
+            self._rate_hourly_counts[domain_lower] = {}
+        client_counts = self._rate_hourly_counts[domain_lower]
+        client_counts[event.client] = client_counts.get(event.client, 0) + 1
+
+        count = client_counts[event.client]
+        # Alert exactly once when threshold is crossed
+        if count == self.config.query_rate_spike_threshold:
+            try:
+                severity = Severity(self.config.query_rate_spike_severity)
+            except ValueError:
+                severity = Severity.MEDIUM
+            return Alert(
+                id=str(uuid.uuid4()),
+                timestamp=event.timestamp,
+                severity=severity,
+                title=f"Query rate spike: {event.domain}",
+                description=(
+                    f"Client {event.client} queried '{event.domain}' "
+                    f"{count} times in the current hour "
+                    f"(threshold: {self.config.query_rate_spike_threshold}). "
+                    f"High per-domain query rates may indicate beaconing, "
+                    f"DNS tunneling, or a forwarding loop."
+                ),
+                source_event_type="dns",
+                client=event.client,
+                domain=event.domain,
+                analyzer="dns_baseline.query_rate_spike",
+                confidence=0.4,
+                tags=["volume_spike", "rate_anomaly"],
+            )
+
+        return None
+
     def _is_watched(self, domain: str) -> bool:
         """Check if domain matches the watched domains list.
 
@@ -695,33 +758,27 @@ class DNSBaselineAnalyzer:
         return alerts
 
     def _check_new_domain(self, event: DNSEvent, domain_lower: str) -> Alert | None:
-        """Check if this is a never-before-seen domain for this client."""
+        """Check if this is a never-before-seen domain for this client.
+
+        Suppressed for globally popular domains (already queried by many
+        clients) — these are clearly not suspicious when a new client queries
+        them. Uses the same popularity thresholds as DGA suppression.
+
+        New-domain alerts are INFO severity and are NOT enriched with LLM
+        classification. The long tail of DNS means most new domains are
+        benign, and classifying each one burns LLM/VT quota for little value.
+        """
         if not self.store.is_domain_known(event.client, domain_lower):
-            # This is a new domain - classify with LLM if available
-            llm_analysis = None
-            severity = Severity.INFO
-            confidence = 0.3
-
-            if self.config.llm_classify_new_domains and self._classifier_available:
-                llm_analysis = self._classify_domain(event)
-
-                # Adjust severity based on LLM classification
-                if llm_analysis:
-                    analysis_lower = llm_analysis.lower()
-                    if "likely_malicious" in analysis_lower or "dga" in analysis_lower:
-                        severity = Severity.HIGH
-                        confidence = 0.8
-                    elif "suspicious" in analysis_lower:
-                        severity = Severity.MEDIUM
-                        confidence = 0.6
-                    elif "tracking" in analysis_lower or "advertising" in analysis_lower:
-                        severity = Severity.LOW
-                        confidence = 0.5
+            # Suppress for well-known domains (same thresholds as DGA suppression)
+            total_queries, unique_clients = self.store.get_domain_popularity(domain_lower)
+            if (total_queries >= self.config.dga_min_queries_suppress
+                    and unique_clients >= self.config.dga_min_clients_suppress):
+                return None
 
             return Alert(
                 id=str(uuid.uuid4()),
                 timestamp=event.timestamp,
-                severity=severity,
+                severity=Severity.INFO,
                 title="New domain observed",
                 description=(
                     f"Client {event.client} queried new domain '{event.domain}' "
@@ -731,8 +788,7 @@ class DNSBaselineAnalyzer:
                 client=event.client,
                 domain=event.domain,
                 analyzer="dns_baseline.new_domain",
-                confidence=confidence,
-                llm_analysis=llm_analysis,
+                confidence=0.3,
                 tags=["new", "baseline"],
             )
 

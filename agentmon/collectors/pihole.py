@@ -7,10 +7,10 @@ Supports two collection methods:
 
 import shlex
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, Optional
 
 from agentmon.models import DNSEvent
 
@@ -20,12 +20,12 @@ class PiholeConfig:
     """Configuration for Pi-hole collector."""
 
     # Local path to FTL database (if accessible)
-    db_path: Optional[Path] = None
+    db_path: Path | None = None
 
     # SSH connection details (if remote)
-    ssh_host: Optional[str] = None
+    ssh_host: str | None = None
     ssh_user: str = "pi"
-    ssh_key_path: Optional[Path] = None
+    ssh_key_path: Path | None = None
     remote_db_path: str = "/etc/pihole/pihole-FTL.db"
 
     # Collection settings
@@ -62,9 +62,9 @@ class PiholeCollector:
 
     def __init__(self, config: PiholeConfig) -> None:
         self.config = config
-        self._last_timestamp: Optional[float] = None
+        self._last_timestamp: float | None = None
 
-    def collect_local(self, since: Optional[datetime] = None) -> Iterator[DNSEvent]:
+    def collect_local(self, since: datetime | None = None) -> Iterator[DNSEvent]:
         """Collect events from a locally accessible FTL database."""
         if self.config.db_path is None:
             raise ValueError("db_path must be set for local collection")
@@ -81,7 +81,7 @@ class PiholeCollector:
         finally:
             conn.close()
 
-    def collect_remote_ssh(self, since: Optional[datetime] = None) -> Iterator[DNSEvent]:
+    def collect_remote_ssh(self, since: datetime | None = None) -> Iterator[DNSEvent]:
         """Collect events via SSH from a remote Pi-hole.
 
         This method SSHs to the Pi-hole and runs sqlite3 queries remotely,
@@ -111,7 +111,7 @@ class PiholeCollector:
             client.close()
 
     def _query_events(
-        self, conn: sqlite3.Connection, since: Optional[datetime]
+        self, conn: sqlite3.Connection, since: datetime | None
     ) -> Iterator[DNSEvent]:
         """Query events from a SQLite connection."""
         cursor = conn.cursor()
@@ -148,7 +148,7 @@ class PiholeCollector:
     def _query_events_ssh(
         self,
         client: "paramiko.SSHClient",
-        since: Optional[datetime],
+        since: datetime | None,
     ) -> Iterator[DNSEvent]:
         """Query events via SSH using sqlite3 CLI.
 
@@ -197,7 +197,7 @@ class PiholeCollector:
                 if event is not None:
                     yield event
 
-    def _row_to_event(self, row: sqlite3.Row) -> Optional[DNSEvent]:
+    def _row_to_event(self, row: sqlite3.Row) -> DNSEvent | None:
         """Convert a database row to a DNSEvent."""
         query_type_int = row["type"]
         query_type = QUERY_TYPE_MAP.get(query_type_int, f"TYPE{query_type_int}")
@@ -209,7 +209,7 @@ class PiholeCollector:
         status = row["status"]
         blocked = status in STATUS_BLOCKED_CODES
 
-        timestamp = datetime.fromtimestamp(row["timestamp"], tz=timezone.utc)
+        timestamp = datetime.fromtimestamp(row["timestamp"], tz=UTC)
 
         return DNSEvent(
             timestamp=timestamp,
@@ -220,7 +220,7 @@ class PiholeCollector:
             response_time_ms=row["reply_time"] / 10.0 if row["reply_time"] else None,
         )
 
-    def _parse_ssh_row(self, parts: list[str]) -> Optional[DNSEvent]:
+    def _parse_ssh_row(self, parts: list[str]) -> DNSEvent | None:
         """Parse a pipe-delimited row from SSH sqlite3 output."""
         try:
             timestamp_val = float(parts[0])
@@ -236,7 +236,7 @@ class PiholeCollector:
                 return None
 
             blocked = status in STATUS_BLOCKED_CODES
-            timestamp = datetime.fromtimestamp(timestamp_val, tz=timezone.utc)
+            timestamp = datetime.fromtimestamp(timestamp_val, tz=UTC)
 
             reply_time_ms = None
             if reply_time_raw:
@@ -256,6 +256,6 @@ class PiholeCollector:
             return None
 
     @property
-    def last_timestamp(self) -> Optional[float]:
+    def last_timestamp(self) -> float | None:
         """Return the timestamp of the last collected event."""
         return self._last_timestamp

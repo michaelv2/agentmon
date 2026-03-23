@@ -3,21 +3,19 @@
 Covers storage, DNS-to-connection correlation, and direct IP access detection.
 """
 
-import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from agentmon.models import Alert, ConnectionEvent, DNSEvent, Severity
+from agentmon.models import ConnectionEvent, DNSEvent, Severity
 from agentmon.storage import EventStore
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _conn(

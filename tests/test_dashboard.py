@@ -1,6 +1,6 @@
 """Tests for the alert review dashboard."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,7 +24,7 @@ def config(tmp_path: Path) -> Config:
 @pytest.fixture
 def populated_db(config: Config) -> None:
     """Populate the test database with sample data."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with EventStore(config.db_path) as store:
         # Insert DNS events
         for i in range(5):
@@ -43,7 +43,7 @@ def populated_db(config: Config) -> None:
                 timestamp=now,
                 severity=Severity.MEDIUM,
                 title="New domain detected",
-                description=f"First seen domain: suspicious.example.com",
+                description="First seen domain: suspicious.example.com",
                 source_event_type="dns",
                 domain="suspicious.example.com",
                 client=f"192.168.1.{10 + i}",
@@ -256,6 +256,7 @@ class TestPendingTuneEndpoints:
     def test_approve_pending_tune(self, config: Config, populated_db: None, tmp_path: Path) -> None:
         """POST approve applies config change."""
         from unittest.mock import patch
+
         from agentmon.storage import EventStore
         store = EventStore(config.db_path)
         store.connect()

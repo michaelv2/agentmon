@@ -1,17 +1,16 @@
 """Tests for syslog receiver and parsers."""
 
-import pytest
 from datetime import datetime
 
-from agentmon.collectors.syslog_receiver import (
-    parse_syslog_message,
-    SyslogMessage,
-    SyslogConfig,
-)
 from agentmon.collectors.syslog_parsers import (
-    PiholeParser,
     OpenWRTParser,
+    PiholeParser,
     route_message,
+)
+from agentmon.collectors.syslog_receiver import (
+    SyslogConfig,
+    SyslogMessage,
+    parse_syslog_message,
 )
 
 
@@ -330,8 +329,9 @@ class TestTCPBufferOverflow:
 
     def test_buffer_overflow_closes_connection(self) -> None:
         """Sending data without newlines exceeding MAX_TCP_BUFFER_SIZE closes the connection."""
-        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
         from unittest.mock import MagicMock
+
+        from agentmon.collectors.syslog_receiver import MAX_TCP_BUFFER_SIZE, TCPSyslogProtocol
 
         handler = MagicMock()
         config = SyslogConfig(protocol="tcp")
@@ -353,8 +353,9 @@ class TestTCPBufferOverflow:
 
     def test_normal_messages_under_limit_work(self) -> None:
         """Normal messages under the buffer limit are processed correctly."""
-        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
         from unittest.mock import MagicMock
+
+        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol
 
         handler = MagicMock()
         config = SyslogConfig(protocol="tcp")
@@ -374,8 +375,9 @@ class TestTCPBufferOverflow:
 
     def test_buffer_resets_after_overflow(self) -> None:
         """Buffer is reset after overflow so no stale data remains."""
-        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
         from unittest.mock import MagicMock
+
+        from agentmon.collectors.syslog_receiver import MAX_TCP_BUFFER_SIZE, TCPSyslogProtocol
 
         handler = MagicMock()
         config = SyslogConfig(protocol="tcp")
@@ -394,8 +396,9 @@ class TestTCPBufferOverflow:
     def test_large_burst_of_newline_delimited_messages_processed(self) -> None:
         """A burst of valid newline-delimited messages exceeding MAX_TCP_BUFFER_SIZE
         should be processed, not discarded as overflow."""
-        from agentmon.collectors.syslog_receiver import TCPSyslogProtocol, MAX_TCP_BUFFER_SIZE
         from unittest.mock import MagicMock
+
+        from agentmon.collectors.syslog_receiver import MAX_TCP_BUFFER_SIZE, TCPSyslogProtocol
 
         handler = MagicMock()
         config = SyslogConfig(protocol="tcp")
@@ -464,7 +467,6 @@ class TestYearAtParseTime:
         If we freeze time to a different year, the default year param should
         reflect the parse-time year, not a cached year from config creation.
         """
-        from unittest.mock import patch
         import datetime as dt_module
 
         # Parse a message — the year should come from datetime.now() at parse time
@@ -474,3 +476,33 @@ class TestYearAtParseTime:
         assert msg is not None
         # The year should be the current year
         assert msg.timestamp.year == dt_module.datetime.now().year
+
+
+class TestReceivedAt:
+    """Test that received_at is populated for message lag detection."""
+
+    def test_received_at_is_populated(self) -> None:
+        """Parsed messages should have a received_at close to now."""
+        data = b"<30>Jan 26 14:32:15 myhost myapp: test message"
+        msg = parse_syslog_message(data, "127.0.0.1")
+        assert msg is not None
+        now = datetime.now()
+        # received_at should be within a few seconds of now
+        assert abs((msg.received_at - now).total_seconds()) < 5
+
+    def test_received_at_differs_from_old_timestamp(self) -> None:
+        """For an old message, received_at should be much later than timestamp."""
+        data = b"<30>Jan 01 00:00:00 myhost myapp: test message"
+        msg = parse_syslog_message(data, "127.0.0.1")
+        assert msg is not None
+        lag = (msg.received_at - msg.timestamp).total_seconds()
+        # Message from Jan 1 parsed later in the year — lag should be positive
+        if msg.timestamp.month < msg.received_at.month:
+            assert lag > 0
+
+    def test_fallback_message_has_received_at(self) -> None:
+        """Fallback-parsed messages should also have received_at."""
+        data = b"some unstructured message"
+        msg = parse_syslog_message(data, "127.0.0.1")
+        assert msg is not None
+        assert msg.received_at is not None

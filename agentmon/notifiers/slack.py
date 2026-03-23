@@ -1,9 +1,7 @@
 """Slack webhook notifier for alerts."""
 
-import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import httpx
 
@@ -42,7 +40,7 @@ class SlackNotifier:
 
     def __init__(self, config: SlackConfig) -> None:
         self.config = config
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:

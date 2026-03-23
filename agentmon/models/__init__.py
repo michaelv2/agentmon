@@ -1,11 +1,11 @@
 """Data models for agentmon events."""
 
 from agentmon.models.events import (
+    Alert,
     ConnectionEvent,
     DNSEvent,
     ProcessNetworkEvent,
     Severity,
-    Alert,
 )
 
 __all__ = [

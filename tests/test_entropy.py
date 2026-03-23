@@ -1,12 +1,11 @@
 """Tests for entropy-based domain analysis."""
 
-import pytest
 
 from agentmon.analyzers.entropy import (
-    calculate_entropy,
     calculate_domain_entropy,
-    is_high_entropy_domain,
+    calculate_entropy,
     has_excessive_consonants,
+    is_high_entropy_domain,
     looks_like_dga,
 )
 

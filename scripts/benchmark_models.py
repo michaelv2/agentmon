@@ -283,7 +283,7 @@ def run_benchmark(models: list[str], verbose: bool = False) -> None:
             print(f"{model:<25} {r['accuracy']:>9.0f}% {r['safety_rate']:>9.0f}% {r['avg_time']:>9.1f}s {parse_ok:>10}")
 
         # Recommendation
-        print(f"\nRecommendation:")
+        print("\nRecommendation:")
         # Sort by safety first, then accuracy, then speed
         ranked = sorted(
             results_by_model.items(),

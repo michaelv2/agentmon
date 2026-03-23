@@ -37,6 +37,13 @@ bind_address = "127.0.0.1"
 # Empty list accepts from all sources (dangerous with 0.0.0.0!)
 # allowed_ips = ["192.168.1.2", "192.168.1.3"]
 
+# Message lag detection: alert when syslog message timestamp is significantly
+# older than arrival time. Catches pipeline stalls, backlogs, and loops.
+lag_detection_enabled = true
+lag_threshold_seconds = 300   # 5 minutes
+lag_severity = "medium"
+lag_alert_cooldown_seconds = 300  # suppress repeat alerts per source IP
+
 [analyzer]
 # Entropy threshold for DGA detection (higher = fewer false positives)
 entropy_threshold = 3.5
@@ -116,6 +123,14 @@ watched_domains = [
     "*.clients.l.google.com",
 ]
 watched_domain_volume_threshold = 50  # queries per client per hour
+
+# Per-domain query rate spike detection.
+# Alert when a single client queries the same domain more than N times per hour.
+# Catches beaconing, DNS tunneling, forwarding loops, and runaway resolvers.
+# Generalized form of OCSP spike detection — applies to any domain.
+query_rate_spike_enabled = true
+query_rate_spike_threshold = 100  # queries per client per domain per hour
+query_rate_spike_severity = "medium"
 
 # Known-bad domain patterns (label-boundary match, case-insensitive)
 # Patterns match at the start of a domain label (after '.' or at domain start)

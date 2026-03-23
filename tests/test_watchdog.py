@@ -1,9 +1,9 @@
 """Tests for the OODA Watchdog."""
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,10 +11,8 @@ from agentmon.llm.anthropic_client import CompletionResult
 from agentmon.models import DNSEvent
 from agentmon.storage import EventStore
 from agentmon.watchdog.models import (
-    OODAConcern,
     OODASnapshot,
     SelfAwarenessMetrics,
-    WatchdogReport,
 )
 from agentmon.watchdog.ooda import OODAWatchdog
 from agentmon.watchdog.queries import (
@@ -43,7 +41,7 @@ def store() -> EventStore:
 @pytest.fixture()
 def populated_store(store: EventStore) -> EventStore:
     """Store with some DNS events for query testing."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events = [
         DNSEvent(timestamp=now, client="192.168.1.100", domain="example.com", query_type="A", blocked=False),
         DNSEvent(timestamp=now, client="192.168.1.100", domain="google.com", query_type="A", blocked=False),
@@ -173,7 +171,7 @@ class TestWatchdogQueries:
 
     def test_new_domains_count_with_baseline(self, populated_store: EventStore) -> None:
         """Domains in baseline are not counted as new."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         populated_store.update_domain_baseline("192.168.1.100", "example.com", now)
         populated_store.update_domain_baseline("192.168.1.100", "google.com", now)
         populated_store.update_domain_baseline("192.168.1.101", "example.com", now)
@@ -645,7 +643,6 @@ class TestWatchdogSlackNotification:
         self, populated_store: EventStore, mock_llm: MagicMock
     ) -> None:
         """Watchdog should notify Slack when creating alerts."""
-        from unittest.mock import AsyncMock
 
         mock_llm.complete_with_usage.return_value = _make_completion(json.dumps({
             "assessment": "Suspicious",

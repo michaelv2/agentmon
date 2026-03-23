@@ -304,6 +304,28 @@ An open syslog receiver allows attackers to:
 
 If running in WSL2 with port forwarding, `--bind` has limited effect since traffic arrives via the Windows NAT gateway. Use Windows Firewall for access control instead.
 
+### Encrypted DNS Bypass (DoH/DoT)
+
+Devices using DNS over HTTPS (DoH) or DNS over TLS (DoT) bypass Pi-hole entirely — agentmon will never see those queries. To ensure full visibility:
+
+1. **Block DoT (port 853)** on OpenWRT — zero collateral damage since port 853 is DNS-only:
+   ```bash
+   uci add firewall rule
+   uci set firewall.@rule[-1].name='Block-DoT'
+   uci set firewall.@rule[-1].src='lan'
+   uci set firewall.@rule[-1].dest='wan'
+   uci set firewall.@rule[-1].dest_port='853'
+   uci set firewall.@rule[-1].proto='tcp udp'
+   uci set firewall.@rule[-1].target='REJECT'
+   uci commit firewall && /etc/init.d/firewall restart
+   ```
+
+2. **Block DoH provider IPs** on port 443 for providers with dedicated DNS IPs (Google, Cloudflare, Quad9, OpenDNS). See pi-route `IMPLEMENTATION.md` Phase 5.1 for the full list.
+
+3. **Block DoH hostnames in Pi-hole** (Domains > Block): `dns.google`, `cloudflare-dns.com`, `mozilla.cloudflare-dns.com`, `dns.quad9.net`, `doh.opendns.com`, etc. Also block `use-application-dns.net` — this is Firefox's canary domain; blocking it makes Firefox automatically disable DoH.
+
+Clients experience no disruption — DoH/DoT silently fails and they fall back to standard DNS through Pi-hole.
+
 ### Syslog is Unencrypted
 
 Standard syslog (UDP/TCP) is not encrypted. If forwarding across untrusted networks:
@@ -374,6 +396,31 @@ If using the systemd service (recommended):
    ```
 
 If using rsyslog (imfile), this usually means rsyslog isn't tailing the Pi-hole log correctly due to buffering issues with pihole-FTL. Consider switching to the systemd service method instead.
+
+### Pi-hole v6: Flood of Repeated HTTPS Queries for Own Hostname
+
+If you see a flood of `query[HTTPS] pi-hole` messages from your router's IP, this is a DNS loop caused by conditional forwarding. Pi-hole forwards local name lookups (including its own hostname) to the router, and the router forwards them back to Pi-hole.
+
+**Why it happens:** Pi-hole's `dns.hosts` entries (Local DNS Records in the GUI) only resolve A/AAAA queries. HTTPS (type 65) queries for the same hostname still get forwarded via conditional forwarding, creating the loop.
+
+**Fix:** Add a custom dnsmasq directive via Pi-hole FTL's config to answer authoritatively for the hostname, so HTTPS queries return NODATA instead of being forwarded:
+
+```bash
+pihole-FTL --config misc.dnsmasq_lines '["local=/pi-hole/"]'
+pihole reloaddns
+```
+
+Replace `pi-hole` with whatever hostname appears in the flood.
+
+> **Note:** Pi-hole v6 uses `pihole-FTL --config` for all configuration. Files in `/etc/dnsmasq.d/` are **not** read by FTL. Do not place custom dnsmasq config there.
+
+**Diagnostic commands:**
+
+```bash
+pihole-FTL --config dns.revServer       # shows conditional forwarding config
+pihole-FTL --config dns.hosts           # shows local DNS records
+pihole-FTL --config misc.dnsmasq_lines  # shows custom dnsmasq directives
+```
 
 ### Flood of Old Messages (rsyslog only)
 

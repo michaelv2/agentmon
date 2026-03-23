@@ -6,7 +6,6 @@ Queries VirusTotal for real-time domain reputation and vendor detections.
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 import requests
 from cachetools import TTLCache
@@ -33,8 +32,8 @@ class VirusTotalReputation:
     suspicious_count: int = 0
     undetected_count: int = 0
     harmless_count: int = 0
-    last_analysis_date: Optional[datetime] = None
-    last_analysis_stats: Optional[dict] = None
+    last_analysis_date: datetime | None = None
+    last_analysis_stats: dict | None = None
 
     @property
     def total_vendors(self) -> int:
@@ -76,7 +75,7 @@ class VirusTotalClient:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: int = 10,
     ) -> None:
         """Initialize VirusTotal client.
@@ -99,7 +98,7 @@ class VirusTotalClient:
         else:
             logger.debug("VirusTotal API disabled (no API key)")
 
-    def lookup(self, domain: str) -> Optional[VirusTotalReputation]:
+    def lookup(self, domain: str) -> VirusTotalReputation | None:
         """Look up domain reputation on VirusTotal.
 
         Args:
@@ -126,7 +125,7 @@ class VirusTotalClient:
             self._neg_cache[domain_lower] = _LOOKUP_FAILED
             return None
 
-    def _query_api(self, domain: str) -> Optional[VirusTotalReputation]:
+    def _query_api(self, domain: str) -> VirusTotalReputation | None:
         """Query VirusTotal API for domain reputation.
 
         Args:

@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from agentmon.analyzers.dns_baseline import AnalyzerConfig
 from agentmon.collectors import PiholeCollector
 from agentmon.collectors.pihole import PiholeConfig
 from agentmon.config import find_config_file, load_config, reload_tunable_config
-from agentmon.models import Severity
+from agentmon.models import Alert, Severity
 from agentmon.policies import DeviceManager, ParentalControlAnalyzer
 from agentmon.storage import EventStore
 
@@ -465,6 +466,9 @@ def listen(
         ocsp_spike_enabled=cfg.ocsp_spike_enabled,
         ocsp_spike_threshold=cfg.ocsp_spike_threshold,
         ocsp_spike_severity=cfg.ocsp_spike_severity,
+        query_rate_spike_enabled=cfg.query_rate_spike_enabled,
+        query_rate_spike_threshold=cfg.query_rate_spike_threshold,
+        query_rate_spike_severity=cfg.query_rate_spike_severity,
         watched_domains=cfg.watched_domains,
         watched_domain_volume_threshold=cfg.watched_domain_volume_threshold,
     )
@@ -492,7 +496,7 @@ def listen(
     # Initialize Slack notifier if configured
     slack_notifier = None
     if cfg.slack_enabled and cfg.slack_webhook_url:
-        from agentmon.notifiers.slack import SlackNotifier, SlackConfig
+        from agentmon.notifiers.slack import SlackConfig, SlackNotifier
 
         slack_config = SlackConfig(
             webhook_url=cfg.slack_webhook_url,
@@ -581,6 +585,9 @@ def listen(
                 config_path=ctx.obj.get("config_path"),
             )
 
+    # Message lag detection: cooldown tracker keyed by source IP
+    _lag_last_alert: dict[str, float] = {}
+
     def handle_message(msg: SyslogMessage) -> None:
         """Process a received syslog message."""
         stats["messages_received"] += 1
@@ -591,6 +598,55 @@ def listen(
                 f"[cyan]{msg.hostname}[/cyan] "
                 f"[yellow]{msg.tag}[/yellow]: {msg.message[:80]}"
             )
+
+        # Message lag detection: alert when syslog message timestamp is
+        # significantly older than arrival time (pipeline stall / backlog)
+        if cfg.syslog_lag_enabled:
+            # Normalize to naive datetimes for comparison (RFC 5424
+            # timestamps are tz-aware, RFC 3164 / received_at are naive)
+            received = msg.received_at.replace(tzinfo=None)
+            sent = msg.timestamp.replace(tzinfo=None)
+            lag = (received - sent).total_seconds()
+            # Guard against clock skew: ignore negative lag or >24h
+            if 0 < lag < 86400 and lag > cfg.syslog_lag_threshold_seconds:
+                source = msg.source_ip or msg.hostname
+                now_ts = msg.received_at.timestamp()
+                last = _lag_last_alert.get(source, 0.0)
+                if now_ts - last >= cfg.syslog_lag_cooldown_seconds:
+                    _lag_last_alert[source] = now_ts
+                    try:
+                        severity = Severity(cfg.syslog_lag_severity)
+                    except ValueError:
+                        severity = Severity.MEDIUM
+                    lag_alert = Alert(
+                        id=str(uuid.uuid4()),
+                        timestamp=msg.received_at,
+                        severity=severity,
+                        title=f"Syslog message lag: {int(lag)}s from {source}",
+                        description=(
+                            f"Message from {source} (tag={msg.tag}) has "
+                            f"{int(lag)}s lag (threshold: "
+                            f"{cfg.syslog_lag_threshold_seconds}s). "
+                            f"Message time: {msg.timestamp}, "
+                            f"arrived: {msg.received_at}. "
+                            f"This may indicate a pipeline stall, backlog, "
+                            f"or forwarding loop."
+                        ),
+                        source_event_type="syslog",
+                        client=source,
+                        analyzer="syslog.lag_detection",
+                        confidence=0.6,
+                        tags=["syslog", "lag", "pipeline"],
+                    )
+                    stats["alerts"] += 1
+                    store.insert_alert(lag_alert)
+                    console.print(
+                        f"[yellow][ALERT][/yellow] {lag_alert.title}"
+                    )
+                    if slack_notifier:
+                        asyncio.get_event_loop().create_task(
+                            slack_notifier.send_alert(lag_alert)
+                        )
 
         # Route to appropriate parser
         dns_event, conn_event = route_message(msg)
@@ -1019,6 +1075,7 @@ def dashboard(ctx: click.Context, host: str | None, port: int | None) -> None:
 
     try:
         import uvicorn
+
         from agentmon.dashboard.app import create_app
     except ImportError:
         console.print("[red]Dashboard dependencies not installed.[/red]")

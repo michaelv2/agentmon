@@ -15,9 +15,8 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from agentmon.llm.anthropic_client import AnthropicClient, CompletionResult
 from agentmon.models import Alert, Severity
@@ -90,8 +89,8 @@ class OODAWatchdog:
         llm: AnthropicClient,
         interval_minutes: int = 15,
         max_tokens_per_cycle: int = 4096,
-        window_minutes: Optional[int] = None,
-        config_path: Optional[Path] = None,
+        window_minutes: int | None = None,
+        config_path: Path | None = None,
     ) -> None:
         """Initialize the watchdog.
 
@@ -109,7 +108,7 @@ class OODAWatchdog:
         self.max_tokens_per_cycle = max_tokens_per_cycle
         self.window_minutes = window_minutes or (interval_minutes * 2)
         self.config_path = config_path
-        self.slack_notifier: Optional[object] = None  # SlackNotifier, if wired
+        self.slack_notifier: object | None = None  # SlackNotifier, if wired
 
         self._cycle_number = 0
         self._metrics = SelfAwarenessMetrics()
@@ -181,7 +180,7 @@ class OODAWatchdog:
 
     def _orient_and_decide(
         self, snapshot: OODASnapshot
-    ) -> tuple[list[OODAConcern], Optional[str], float]:
+    ) -> tuple[list[OODAConcern], str | None, float]:
         """Orient+Decide phases: build prompt and query LLM.
 
         Returns:
@@ -239,7 +238,7 @@ class OODAWatchdog:
 
     def _build_user_message(self, snapshot: OODASnapshot) -> str:
         """Build the user message for the LLM with snapshot and metrics."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         data = snapshot.to_dict()
 
         # Serialize datetimes in alerts for JSON
@@ -423,7 +422,7 @@ class OODAWatchdog:
                 severity = severity_map.get(concern.severity, Severity.MEDIUM)
                 alert = Alert(
                     id=str(uuid.uuid4()),
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=datetime.now(UTC),
                     severity=severity,
                     title=f"[Watchdog] {concern.title}",
                     description=concern.description,
@@ -514,7 +513,7 @@ class OODAWatchdog:
         try:
             self.store.insert_pending_tune({
                 "id": str(uuid.uuid4()),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "cycle_number": self._cycle_number,
                 "tune_action": concern.tune_action,
                 "tune_value": concern.tune_value,
@@ -550,7 +549,7 @@ class OODAWatchdog:
         try:
             self.store.insert_watchdog_observation(
                 observation_id=str(uuid.uuid4()),
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 cycle_number=report.cycle_number,
                 snapshot_json=json.dumps(report.snapshot.to_dict(), default=str),
                 concerns_json=json.dumps(

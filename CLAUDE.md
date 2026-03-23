@@ -6,6 +6,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 agentmon is a network agent activity monitor and auditor that detects anomalous DNS activity from AI agents and other software by monitoring Pi-hole and/or OpenWRT logs. It uses DuckDB for storage, supports LLM-based domain classification via Ollama, integrates threat intelligence feeds, and provides real-time alerting through Slack.
 
+## System Context
+
+agentmon is one component of a tightly coupled home network security stack. Changes to any component can affect the others — always consider the system holistically.
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Network Stack                     │
+│                                                      │
+│  ┌────────────┐  DNS queries   ┌────────────┐       │
+│  │  Clients   │ ─────────────> │  Pi-hole    │       │
+│  │ (70-80     │  (forced via   │  (DNS +     │       │
+│  │  devices)  │   DNAT rule)   │  blocklist) │       │
+│  └────────────┘                └─────┬──────┘       │
+│                                      │ syslog/TCP   │
+│  ┌────────────┐  firewall     ┌──────▼──────┐       │
+│  │  pi-route  │  logs via     │  agentmon   │       │
+│  │  (OpenWRT  │ ────────────> │  (monitor + │       │
+│  │   router)  │  syslog       │   alerting) │       │
+│  └────────────┘               └─────────────┘       │
+└─────────────────────────────────────────────────────┘
+```
+
+**Components and repos:**
+
+| Component | Repo | Role |
+|-----------|------|------|
+| **pi-route** | `~/projects/pi-route` | OpenWRT router (CM4). DNS DNAT to Pi-hole, DoH/DoT blocking, firewall, parental controls |
+| **Pi-hole** | *(no repo — config-managed)* | DNS resolver + blocklist. Runs Pi-hole v6 (FTL). Configured via web UI and `pihole-FTL --config` |
+| **agentmon** | `~/projects/agentmon` | Monitoring layer. Receives syslog from Pi-hole and OpenWRT, analyzes DNS patterns, alerts |
+
+**Key dependencies and coupling:**
+- agentmon's visibility depends on Pi-hole seeing all DNS → pi-route must force DNS to Pi-hole (DNAT) and block DoH/DoT
+- agentmon's syslog parser expects Pi-hole's dnsmasq log format → Pi-hole version changes can break parsing
+- pi-route's firewall logs flow to agentmon → firewall rule changes affect what agentmon sees
+- Pi-hole's conditional forwarding interacts with pi-route's DNS → misconfiguration causes loops (see Troubleshooting in `docs/edge-setup.md`)
+- Client resolver maps IPs to hostnames using Pi-hole's DHCP/DNS data → Pi-hole or router DHCP changes affect baseline continuity
+- Pi-hole v6 uses `pihole-FTL --config` for all configuration; `/etc/dnsmasq.d/` is NOT read by FTL
+
+**When making changes, consider:**
+- DNS rule changes on pi-route → does agentmon still see all queries?
+- Pi-hole config changes → does syslog forwarding still work? Do parsers handle the format?
+- agentmon analyzer changes → do thresholds make sense given the network's traffic patterns (~70-80 devices)?
+
 ## Commands
 
 ### Development Setup
@@ -116,6 +159,11 @@ Pi-hole/OpenWRT → Syslog → SyslogReceiver → Parsers → Analyzers → Even
 - **`agentmon/notifiers/`**: Alert notification systems
   - `slack.py`: Slack webhook integration
 
+- **`agentmon/watchdog/`**: OODA Watchdog — periodic LLM-based traffic evaluation
+  - `ooda.py`: OODAWatchdog class — runs Observe-Orient-Decide-Act cycles on a timer
+  - `models.py`: OODASnapshot, OODAConcern, WatchdogReport, SelfAwarenessMetrics
+  - `queries.py`: DuckDB queries for traffic snapshots (top domains, top clients, new domains, recent alerts)
+
 - **`agentmon/policies/`**: Policy enforcement
   - Parental control analyzer with time-based content filtering
 
@@ -157,6 +205,32 @@ The analyzer system uses a layered approach:
    - Escalation to thorough model (gpt-oss:20b) for suspicious domains
    - VirusTotal integration for additional context before escalation
    - Triage model auto-unloads after use (keep_alive + HTTP API) to free GPU/RAM
+8. **Per-Domain Query Rate Spike**: Alerts when any client+domain pair exceeds hourly threshold (default: 100). Catches beaconing, DNS tunneling, forwarding loops.
+9. **Message Lag Detection**: Compares syslog message timestamp to arrival time. Alerts when lag exceeds threshold (default: 5 minutes). Catches pipeline stalls and backlogs.
+
+### OODA Watchdog
+
+The watchdog is an optional **Observe-Orient-Decide-Act loop** that periodically sends traffic snapshots to Claude (via Anthropic API) for SOC-analyst-style evaluation. It sits above the rule-based analyzers as a holistic judgment layer.
+
+**How it works:**
+1. **Observe**: Queries DuckDB for a traffic snapshot (top domains, top clients, new domains, recent alerts) over a configurable window (default: 2x interval)
+2. **Orient + Decide**: Sends the snapshot to Claude with a SOC analyst system prompt. Claude returns structured JSON with concerns, severity ratings, and recommended actions
+3. **Act**: Creates alerts for concerns rated "alert" or "investigate". Can also suggest config tuning (e.g., adding false-positive domains to the allowlist via `tune_action: "add_allowlist"`)
+
+**Key design decisions:**
+- LLM call runs in a thread-pool executor so the event loop stays responsive
+- Skips the LLM call entirely if no traffic in the observation window
+- Tracks its own operational cost (tokens, latency, API spend) and includes this in the prompt — the LLM is self-aware of its resource usage
+- Stores audit records of each cycle for observability
+
+**Configuration**: `[watchdog]` section in config:
+- `enabled`: Enable/disable (default: false)
+- `interval_minutes`: Minutes between cycles (default: 15)
+- `model`: Claude model to use (default: claude-sonnet-4-6)
+- `max_tokens_per_cycle`: Max output tokens per LLM call (default: 4096)
+- `window_minutes`: Traffic window to observe (default: 2x interval)
+
+Requires `ANTHROPIC_API_KEY` env var or `[anthropic] api_key` in config.
 
 ### Client Identity Resolution
 
@@ -200,7 +274,8 @@ Configuration uses TOML format. See `config/agentmon.example.toml` for comprehen
 - `[device_activity]`: Activity anomaly detection
 - `[retention]`: Data cleanup policies
 - `[slack]`: Webhook notifications
-- `[syslog]`: Receiver settings
+- `[syslog]`: Receiver settings, message lag detection
+- `[watchdog]`: OODA watchdog (periodic LLM-based traffic evaluation)
 
 ## Code Style
 

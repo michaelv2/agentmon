@@ -1,6 +1,6 @@
 """Tests for VolumeAnomalyAnalyzer."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -31,7 +31,7 @@ def make_event(
     maps directly to Python's weekday() return value.
     """
     # June 2, 2025 is Monday (weekday=0)
-    ts = datetime(2025, 6, 2 + day, hour, 30, 0, tzinfo=timezone.utc)
+    ts = datetime(2025, 6, 2 + day, hour, 30, 0, tzinfo=UTC)
     return DNSEvent(
         timestamp=ts,
         client=client,

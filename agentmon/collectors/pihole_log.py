@@ -14,13 +14,13 @@ FTL.log contains debug/operational info, less useful for DNS monitoring.
 """
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, Optional, TextIO
+from typing import TextIO
 
 from agentmon.models import DNSEvent
-
 
 # Regex patterns for pihole.log
 QUERY_PATTERN = re.compile(
@@ -45,12 +45,12 @@ class PiholeLogConfig:
     """Configuration for Pi-hole log collector."""
 
     # Local log path
-    log_path: Optional[Path] = None
+    log_path: Path | None = None
 
     # SSH connection for remote logs
-    ssh_host: Optional[str] = None
+    ssh_host: str | None = None
     ssh_user: str = "pi"
-    ssh_key_path: Optional[Path] = None
+    ssh_key_path: Path | None = None
     remote_log_path: str = "/var/log/pihole/pihole.log"
 
     # Year for timestamp parsing (logs don't include year)
@@ -66,7 +66,7 @@ class PiholeLogCollector:
     def tail_local(
         self,
         lines: int = 1000,
-        since: Optional[datetime] = None,
+        since: datetime | None = None,
     ) -> Iterator[DNSEvent]:
         """Read recent entries from local log file.
 
@@ -84,7 +84,7 @@ class PiholeLogCollector:
             raise FileNotFoundError(f"Pi-hole log not found: {self.config.log_path}")
 
         # Read last N lines (simple approach; for production, use tail -f or inotify)
-        with open(self.config.log_path, "r") as f:
+        with open(self.config.log_path) as f:
             # Seek to approximate position near end
             f.seek(0, 2)  # End of file
             file_size = f.tell()
@@ -98,7 +98,7 @@ class PiholeLogCollector:
 
             yield from self._parse_log_lines(f, since)
 
-    def stream_local(self, since: Optional[datetime] = None) -> Iterator[DNSEvent]:
+    def stream_local(self, since: datetime | None = None) -> Iterator[DNSEvent]:
         """Stream events from local log file (blocking).
 
         Similar to 'tail -f'. For production use, consider using
@@ -109,7 +109,7 @@ class PiholeLogCollector:
 
         import time
 
-        with open(self.config.log_path, "r") as f:
+        with open(self.config.log_path) as f:
             # Start from end
             f.seek(0, 2)
 
@@ -125,7 +125,7 @@ class PiholeLogCollector:
     def collect_remote_ssh(
         self,
         lines: int = 1000,
-        since: Optional[datetime] = None,
+        since: datetime | None = None,
     ) -> Iterator[DNSEvent]:
         """Collect recent log entries via SSH.
 
@@ -169,7 +169,7 @@ class PiholeLogCollector:
     def _parse_log_lines(
         self,
         f: TextIO,
-        since: Optional[datetime],
+        since: datetime | None,
     ) -> Iterator[DNSEvent]:
         """Parse log lines from a file handle."""
         for line in f:
@@ -180,8 +180,8 @@ class PiholeLogCollector:
     def _parse_line(
         self,
         line: str,
-        since: Optional[datetime],
-    ) -> Optional[DNSEvent]:
+        since: datetime | None,
+    ) -> DNSEvent | None:
         """Parse a single log line into a DNSEvent."""
         if not line:
             return None
