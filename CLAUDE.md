@@ -154,7 +154,7 @@ Pi-hole/OpenWRT → Syslog → SyslogReceiver → Parsers → Analyzers → Even
 - **`agentmon/threat_intel/`**: External threat intelligence
   - `virustotal.py`: VirusTotal API client with caching
 
-- **`agentmon/threat_feeds.py`**: Threat feed management (URLhaus, Feodo Tracker)
+- **`agentmon/threat_feeds.py`**: Threat feed management (URLhaus, CERT.PL)
 
 - **`agentmon/notifiers/`**: Alert notification systems
   - `slack.py`: Slack webhook integration
@@ -197,7 +197,7 @@ The analyzer system uses a layered approach:
 1. **Baseline Learning**: DNSBaselineAnalyzer tracks first-seen domains per client
 2. **Pattern Matching**: Entropy analysis (DGA detection), known-bad patterns
 3. **False Positive Suppression**: Trusted infrastructure modifier (CDN/cloud parents), query frequency threshold (popular domains)
-4. **Threat Feeds**: URLhaus and Feodo Tracker integration
+4. **Threat Feeds**: URLhaus and CERT.PL integration
 5. **OCSP Spike Detection**: Per-client hourly volume monitoring for OCSP domains
 6. **Watched Domains**: Enhanced monitoring for potential C2 fronting / exfiltration vectors
 7. **LLM Classification** (optional):
@@ -268,7 +268,7 @@ Configuration uses TOML format. See `config/agentmon.example.toml` for comprehen
 **Key sections:**
 - `[analyzer]`: Entropy thresholds, known-bad patterns, allowlists, trusted infrastructure, DGA suppression, OCSP spike detection, watched domains
 - `[llm]`: Ollama models, escalation settings
-- `[threat_feeds]`: URLhaus/Feodo integration
+- `[threat_feeds]`: URLhaus/CERT.PL integration
 - `[virustotal]`: API key (prefer env var: `VIRUSTOTAL_API_KEY`)
 - `[client_resolver]`: IP → hostname resolution
 - `[device_activity]`: Activity anomaly detection

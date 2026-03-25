@@ -71,9 +71,9 @@ class ThreatFeedManager:
                 "description": "URLhaus malware/C2 domains (abuse.ch)",
             },
             {
-                "name": "feodo",
-                "url": "https://feodotracker.abuse.ch/downloads/domainblocklist.txt",
-                "description": "Feodo Tracker botnet C2 (abuse.ch)",
+                "name": "certpl",
+                "url": "https://hole.cert.pl/domains/domains.txt",
+                "description": "CERT.PL malicious domains (phishing, malware, C2)",
             },
         ]
 

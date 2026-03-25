@@ -21,11 +21,11 @@ Currently integrated feeds (all from abuse.ch):
 - **Update frequency:** Daily
 - **Quality:** High - actively maintained by security researchers
 
-### Feodo Tracker
-- **URL:** https://feodotracker.abuse.ch/
-- **Content:** C2 servers for banking trojans (Dridex, TrickBot, Emotet)
-- **Update frequency:** Real-time
-- **Quality:** High - dedicated botnet tracking
+### CERT.PL
+- **URL:** https://hole.cert.pl/domains/domains.txt
+- **Content:** Malicious domains (phishing, malware, C2) identified by Poland's national CERT
+- **Update frequency:** Daily
+- **Quality:** High - national CERT with active incident response
 
 ## Configuration
 
@@ -69,7 +69,7 @@ Total malicious domains: 12,453
 │ Feed    │ Domains │ Last Updated        │ Age (hours)│
 ├─────────┼─────────┼─────────────────────┼────────────┤
 │ urlhaus │  8,234  │ 2026-01-28 14:23:15 │     2      │
-│ feodo   │  4,219  │ 2026-01-28 14:23:17 │     2      │
+│ certpl  │ 12,471  │ 2026-01-28 14:23:17 │     2      │
 └─────────┴─────────┴─────────────────────┴────────────┘
 
 Cache directory: /home/user/.cache/agentmon/feeds
@@ -176,9 +176,9 @@ feeds = [
         "description": "URLhaus malware/C2 domains (abuse.ch)",
     },
     {
-        "name": "feodo",
-        "url": "https://feodotracker.abuse.ch/downloads/domainblocklist.txt",
-        "description": "Feodo Tracker botnet C2 (abuse.ch)",
+        "name": "certpl",
+        "url": "https://hole.cert.pl/domains/domains.txt",
+        "description": "CERT.PL malicious domains (phishing, malware, C2)",
     },
     # Add new feed here:
     {

@@ -14,7 +14,7 @@ The LLM integration allows for intelligent classification of domains based on th
 - **DGA detection** - Flags algorithmically-generated domains using entropy analysis, with CDN/infrastructure trust modifier to reduce false positives
 - **Watched domains** - Enhanced monitoring for legitimate domains that could be abused as C2 fronting or data-exfiltration vectors
 - **Known-bad patterns** - Matches against configurable threat indicators (C2, malware, mining pools)
-- **Threat intelligence feeds** - Automatic updates from URLhaus, Feodo Tracker (malware/C2/phishing)
+- **Threat intelligence feeds** - Automatic updates from URLhaus, CERT.PL (malware/C2/phishing)
 - **LLM classification** - Two-tier Ollama integration for intelligent domain analysis
 - **Device activity anomaly** - Learns normal activity hours per device, alerts on off-hours activity
 - **Parental controls** - Time-based content filtering with category blocking
@@ -174,7 +174,7 @@ agentmon listen --llm
 
 ### Threat intelligence feeds
 
-Automatically downloads and checks domains against external threat feeds from reputable sources (URLhaus, Feodo Tracker). Provides high-confidence alerts for known malware/C2/phishing domains.
+Automatically downloads and checks domains against external threat feeds from reputable sources (URLhaus, CERT.PL). Provides high-confidence alerts for known malware/C2/phishing domains.
 
 ```toml
 [threat_feeds]
@@ -201,7 +201,7 @@ agentmon feeds
 
 **Feed sources:**
 - **URLhaus (abuse.ch)** - Malware distribution sites, C2 servers, phishing
-- **Feodo Tracker (abuse.ch)** - Banking trojan C2 servers (Dridex, TrickBot, Emotet)
+- **CERT.PL** - Malicious domains (phishing, malware, C2) from Poland's national CERT
 
 ### VirusTotal reputation checking
 
