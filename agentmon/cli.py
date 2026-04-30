@@ -1147,7 +1147,7 @@ def reassess(
     from agentmon.reassess.analyzer import ReassessmentAnalyzer
 
     with EventStore(db_path, read_only=True) as store:
-        analyzer = ReassessmentAnalyzer(store, anthropic_client)
+        analyzer = ReassessmentAnalyzer(store, anthropic_client, config=cfg)
 
         if anthropic_client:
             console.print("[dim]Using Claude Sonnet for analysis...[/dim]")

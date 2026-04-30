@@ -1,7 +1,11 @@
 """Reassessment orchestrator: queries + heuristics + optional LLM analysis."""
 
+from __future__ import annotations
+
 import logging
 
+from agentmon.analyzers.entropy import is_trusted_infrastructure
+from agentmon.config import Config
 from agentmon.reassess.queries import (
     get_analyzer_false_positive_rates,
     get_high_frequency_alert_domains,
@@ -17,6 +21,9 @@ LLM_SYSTEM_PROMPT = (
     "You are a network security engineer reviewing DNS monitoring rules for a home/small-office "
     "network. Your job is to analyze alert patterns and suggest improvements to reduce false "
     "positives while maintaining detection coverage.\n\n"
+    "The current analyzer configuration is provided below the alert data. Do NOT recommend "
+    "allowlisting domains that are already covered by the allowlist, trusted_infrastructure, "
+    "or ignore_suffixes. Focus on gaps and domains that are genuinely missing.\n\n"
     "Provide concise, actionable recommendations in these categories:\n"
     "1. Domains that should be allowlisted (clearly benign but frequently alerting)\n"
     "2. Patterns that need tuning (too broad or too narrow)\n"
@@ -29,9 +36,32 @@ LLM_SYSTEM_PROMPT = (
 class ReassessmentAnalyzer:
     """Orchestrates reassessment analysis combining heuristics and optional LLM."""
 
-    def __init__(self, store: EventStore, anthropic_client: object | None = None) -> None:
+    def __init__(
+        self,
+        store: EventStore,
+        anthropic_client: object | None = None,
+        config: Config | None = None,
+    ) -> None:
         self.store = store
         self._llm = anthropic_client
+        self._config = config or Config()
+
+    def _is_already_suppressed(self, domain: str) -> bool:
+        """Check if a domain is already handled by allowlist, ignore_suffixes, or trusted infra."""
+        # Check ignore_suffixes
+        if any(domain.endswith(s) for s in self._config.ignore_suffixes):
+            return True
+        # Check allowlist (exact + wildcard, same logic as dns_baseline)
+        for entry in self._config.allowlist:
+            if entry.startswith("*."):
+                suffix = entry[1:]  # ".example.com"
+                parent = entry[2:]  # "example.com"
+                if domain == parent or domain.endswith(suffix):
+                    return True
+            elif domain == entry:
+                return True
+        # Check trusted_infrastructure
+        return is_trusted_infrastructure(domain, frozenset(self._config.trusted_infrastructure))
 
     def analyze(self, days: int = 7) -> ReassessmentReport:
         """Run full reassessment analysis.
@@ -78,22 +108,23 @@ class ReassessmentAnalyzer:
     ) -> None:
         """Heuristic: domain with >10 alerts and >50% FP rate → suggest allowlist."""
         for domain_data in high_freq:
+            domain = domain_data["domain"]
             alert_count = domain_data["alert_count"]
             fp_count = domain_data["fp_count"]
 
             if alert_count > 10 and fp_count > 0:
                 fp_rate = fp_count / alert_count
-                if fp_rate > 0.5:
+                if fp_rate > 0.5 and not self._is_already_suppressed(domain.lower()):
                     report.findings.append(ReassessmentFinding(
                         category="allowlist_candidate",
-                        title=f"{domain_data['domain']} — {fp_rate:.0%} false positive rate",
+                        title=f"{domain} — {fp_rate:.0%} false positive rate",
                         description=(
                             f"{alert_count} alerts, {fp_count} marked as false positive. "
                             f"Analyzers: {', '.join(domain_data.get('analyzers', []))}"
                         ),
-                        domain=domain_data["domain"],
+                        domain=domain,
                         severity="action",
-                        recommendation=f"Add '{domain_data['domain']}' to allowlist",
+                        recommendation=f"Add '{domain}' to allowlist",
                     ))
 
     def _find_blind_spots(
@@ -192,6 +223,30 @@ class ReassessmentAnalyzer:
                     f"{a['title'][:60]} (analyzer={a.get('analyzer', 'N/A')}){fp_marker}"
                 )
             sections.append("\n".join(lines))
+
+        # Include current config so the LLM knows what's already suppressed
+        config_lines = ["## Current Analyzer Config"]
+        if self._config.allowlist:
+            config_lines.append("Allowlist: " + ", ".join(sorted(self._config.allowlist)))
+        if self._config.trusted_infrastructure:
+            config_lines.append(
+                "Trusted infrastructure: "
+                + ", ".join(sorted(self._config.trusted_infrastructure))
+            )
+        if self._config.ignore_suffixes:
+            config_lines.append(
+                "Ignored suffixes: " + ", ".join(self._config.ignore_suffixes)
+            )
+        config_lines.append(f"Entropy threshold: {self._config.entropy_threshold}")
+        config_lines.append(
+            f"DGA suppression: >{self._config.dga_min_queries_suppress} queries "
+            f"from >{self._config.dga_min_clients_suppress} clients"
+        )
+        if self._config.ocsp_spike_enabled:
+            config_lines.append(
+                f"OCSP spike threshold: {self._config.ocsp_spike_threshold}/client/hour"
+            )
+        sections.append("\n".join(config_lines))
 
         user_message = "\n\n".join(sections)
 

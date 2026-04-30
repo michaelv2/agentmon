@@ -53,24 +53,34 @@ class ReassessmentReport:
         lines.append(f"  LLM analysis: {'yes' if self.llm_used else 'no'}")
         lines.append("")
 
+        # LLM analysis first — most actionable, and Slack truncates long reports
+        if self.llm_analysis:
+            lines.append("[cyan bold]LLM Analysis Summary[/cyan bold]")
+            lines.append(self.llm_analysis)
+            lines.append("")
+
         if not self.findings:
             lines.append("[green]No findings — rules appear well-tuned.[/green]")
             return "\n".join(lines)
 
         # Group findings by category
-        categories = {}
+        categories: dict[str, list[ReassessmentFinding]] = {}
         for f in self.findings:
             categories.setdefault(f.category, []).append(f)
 
         category_labels = {
             "allowlist_candidate": "Allowlist Candidates (Likely False Positives)",
-            "blind_spot": "Potential Blind Spots",
             "analyzer_review": "Analyzer Review",
             "llm_insight": "LLM Insights",
+            "blind_spot": "Potential Blind Spots",
         }
 
-        for cat, items in categories.items():
-            label = category_labels.get(cat, cat)
+        # Render in label order so blind_spot is always last
+        for cat in category_labels:
+            items = categories.get(cat)
+            if not items:
+                continue
+            label = category_labels[cat]
             lines.append(f"[yellow bold]{label}[/yellow bold]")
             for item in items:
                 severity_style = {
@@ -85,9 +95,16 @@ class ReassessmentReport:
                     lines.append(f"    [cyan]Recommendation:[/cyan] {item.recommendation}")
             lines.append("")
 
-        if self.llm_analysis:
-            lines.append("[cyan bold]LLM Analysis Summary[/cyan bold]")
-            lines.append(self.llm_analysis)
+        # Render any categories not in the predefined order
+        for cat, items in categories.items():
+            if cat in category_labels:
+                continue
+            lines.append(f"[yellow bold]{cat}[/yellow bold]")
+            for item in items:
+                lines.append(f"  {item.title}")
+                lines.append(f"    {item.description}")
+                if item.recommendation:
+                    lines.append(f"    [cyan]Recommendation:[/cyan] {item.recommendation}")
             lines.append("")
 
         return "\n".join(lines)
