@@ -60,6 +60,16 @@ curl -s -X POST "$AGENTMON_SLACK_WEBHOOK" \
 ### 4. Investigate
 Run deeper ad-hoc DuckDB queries to examine a specific pattern, or use `agentmon reassess` to re-evaluate domains against current threat intel.
 
+**Important**: agentmon holds a write lock on the database. For ad-hoc queries, use the same temp-copy approach as the snapshot script:
+```bash
+SNAP_DIR="$HOME/.cache/agentmon-investigate.$$"
+mkdir -p "$SNAP_DIR" && trap 'rm -rf "$SNAP_DIR"' EXIT
+cp ~/.local/share/agentmon/events.db "$SNAP_DIR/events.db"
+[[ -f ~/.local/share/agentmon/events.db.wal ]] && cp ~/.local/share/agentmon/events.db.wal "$SNAP_DIR/events.db.wal"
+duckdb "$SNAP_DIR/events.db" "YOUR QUERY HERE"
+```
+Never query the live database directly — it will fail with a lock error.
+
 ### 5. Tune
 Edit the allowlist or thresholds in `~/.config/agentmon/agentmon.toml` to reduce false positives or tighten detection. Only do this when you're confident a pattern is benign (e.g., infrastructure domains generating repeated alerts).
 

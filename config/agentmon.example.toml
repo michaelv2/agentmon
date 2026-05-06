@@ -544,8 +544,8 @@ enabled = false
 # Minutes between OODA cycles
 interval_minutes = 15
 
-# Claude model to use for analysis
-model = "claude-sonnet-4-6"
+# Claude model to use for analysis (haiku is recommended for cost efficiency)
+model = "claude-haiku-4-5-20251001"
 
 # Max output tokens per LLM call (controls response verbosity and cost)
 max_tokens_per_cycle = 1024

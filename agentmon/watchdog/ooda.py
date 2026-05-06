@@ -201,8 +201,15 @@ class OODAWatchdog:
         input_tokens = result.input_tokens
         output_tokens = result.output_tokens
 
-        # Compute cost from real token counts (Claude Sonnet pricing: ~$3/$15 per M tokens)
-        cost = (input_tokens * 3.0 + output_tokens * 15.0) / 1_000_000
+        # Compute cost from real token counts (per-million-token pricing by model)
+        model_name = self.llm.config.model if self.llm else ""
+        if "haiku" in model_name:
+            input_rate, output_rate = 1.0, 5.0
+        elif "opus" in model_name:
+            input_rate, output_rate = 15.0, 75.0
+        else:  # sonnet or unknown
+            input_rate, output_rate = 3.0, 15.0
+        cost = (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
 
         self._metrics.update_cycle(input_tokens, output_tokens, latency_ms, cost)
 

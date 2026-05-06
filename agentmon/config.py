@@ -178,7 +178,7 @@ class Config:
     # OODA Watchdog
     watchdog_enabled: bool = False
     watchdog_interval_minutes: int = 15
-    watchdog_model: str = "claude-sonnet-4-6"
+    watchdog_model: str = "claude-haiku-4-5-20251001"
     watchdog_max_tokens_per_cycle: int = 4096
     watchdog_window_minutes: int | None = None
 

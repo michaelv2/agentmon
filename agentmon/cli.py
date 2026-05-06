@@ -1172,5 +1172,197 @@ def reassess(
             console.print(output_text, highlight=False)
 
 
+@main.command()
+@click.option(
+    "--status",
+    type=click.Choice(["pending", "approved", "rejected", "all"]),
+    default="pending",
+    help="Filter by status (default: pending)",
+)
+@click.option("--approve", type=str, default=None, help="Approve by ID prefix")
+@click.option("--reject", type=str, default=None, help="Reject by ID prefix")
+@click.option("--apply", is_flag=True, default=False, help="Apply approved tune actions to config")
+@click.pass_context
+def tunes(
+    ctx: click.Context,
+    status: str,
+    approve: str | None,
+    reject: str | None,
+    apply: bool,
+) -> None:
+    """Review and manage pending watchdog tune actions.
+
+    The OODA watchdog queues config change suggestions (allowlist additions,
+    known-bad patterns) for human approval. Use this command to review,
+    approve/reject, and apply them.
+
+    Examples:
+        agentmon tunes                      # List pending actions
+        agentmon tunes --status all         # List all actions
+        agentmon tunes --approve abc123     # Approve by ID prefix
+        agentmon tunes --reject abc123      # Reject by ID prefix
+        agentmon tunes --apply              # Apply all approved actions to config
+    """
+    db_path: Path = ctx.obj["db_path"]
+    cfg = ctx.obj["config"]
+    with EventStore(db_path, read_only=True) as store:
+        # Approve or reject (needs write; attempt separate connection)
+        if approve or reject:
+            action_id_prefix = approve or reject
+            new_status = "approved" if approve else "rejected"
+            _resolve_tune(store, db_path, action_id_prefix, new_status)
+            return
+
+        # Apply approved actions to config (DB is read-only; config write is separate)
+        if apply:
+            _apply_approved_tunes(store, cfg)
+            return
+
+        # List
+        if status == "all":
+            items = (
+                store.get_pending_tunes("pending")
+                + store.get_pending_tunes("approved")
+                + store.get_pending_tunes("rejected")
+            )
+        else:
+            items = store.get_pending_tunes(status)
+
+        if not items:
+            label = "pending" if status == "all" else status
+            console.print(f"[green]No {label} tune actions[/green]")
+            return
+
+        table = Table(title=f"Tune Actions ({status})")
+        table.add_column("ID", style="dim", max_width=8)
+        table.add_column("Time", style="dim")
+        table.add_column("Action")
+        table.add_column("Value")
+        table.add_column("Reason")
+        table.add_column("Sev")
+        table.add_column("Conf", justify="right")
+        table.add_column("Status")
+
+        severity_styles = {
+            "info": "dim", "low": "blue", "medium": "yellow",
+            "high": "red", "critical": "red bold",
+        }
+
+        for item in items:
+            ts = item["timestamp"]
+            if isinstance(ts, datetime):
+                time_str = ts.strftime("%m-%d %H:%M")
+            else:
+                time_str = str(ts)[:11]
+
+            sev_style = severity_styles.get(item["severity"], "white")
+            status_style = {
+                "pending": "yellow", "approved": "green", "rejected": "red",
+            }.get(item["status"], "white")
+
+            table.add_row(
+                item["id"][:8],
+                time_str,
+                item["tune_action"],
+                item["tune_value"],
+                item["concern_title"][:40],
+                f"[{sev_style}]{item['severity'].upper()}[/{sev_style}]",
+                f"{item['confidence']:.0%}",
+                f"[{status_style}]{item['status']}[/{status_style}]",
+            )
+
+        console.print(table)
+
+
+def _resolve_tune(
+    store: EventStore, db_path: Path, id_prefix: str, new_status: str,
+) -> None:
+    """Approve or reject a tune action by ID prefix."""
+    # Find matching items (read-only connection)
+    all_pending = store.get_pending_tunes("pending")
+    matches = [t for t in all_pending if t["id"].startswith(id_prefix)]
+
+    if not matches:
+        console.print(
+            f"[red]No pending tune action matching '{id_prefix}'[/red]",
+        )
+        return
+    if len(matches) > 1:
+        console.print(
+            f"[red]Ambiguous prefix '{id_prefix}' — "
+            f"matches {len(matches)} items:[/red]",
+        )
+        for m in matches:
+            console.print(
+                f"  {m['id'][:8]}  {m['tune_action']}  {m['tune_value']}",
+            )
+        return
+
+    item = matches[0]
+    try:
+        with EventStore(db_path) as write_store:
+            write_store.update_pending_tune_status(item["id"], new_status)
+    except Exception:
+        console.print(
+            "[red]Cannot write to DB — stop agentmon first, or "
+            "use the dashboard[/red]",
+        )
+        return
+
+    verb = "Approved" if new_status == "approved" else "Rejected"
+    console.print(
+        f"[green]{verb}[/green]: {item['tune_action']} "
+        f"{item['tune_value']} ({item['id'][:8]})",
+    )
+
+
+def _apply_approved_tunes(store: EventStore, cfg: object) -> None:
+    """Apply all approved tune actions to config."""
+    from agentmon.config import find_config_file, update_tunable_field
+
+    approved = store.get_pending_tunes("approved")
+    if not approved:
+        console.print("[green]No approved tune actions to apply[/green]")
+        return
+
+    config_path = find_config_file()
+    applied_ids: list[str] = []
+    for item in approved:
+        try:
+            update_tunable_field(
+                item["tune_action"], item["tune_value"], config_path,
+            )
+            console.print(
+                f"  [green]Applied[/green]: {item['tune_action']} "
+                f"{item['tune_value']}"
+            )
+            applied_ids.append(item["id"])
+        except Exception as e:
+            console.print(
+                f"  [red]Failed[/red]: {item['tune_action']} "
+                f"{item['tune_value']} — {e}"
+            )
+
+    if not applied_ids:
+        return
+
+    console.print(
+        f"\n[green]{len(applied_ids)} change(s) applied to {config_path}[/green]"
+    )
+    console.print("[dim]Send SIGHUP to agentmon to hot-reload config[/dim]")
+
+    # Mark as applied (needs write access; skip if agentmon holds the lock)
+    db_path = store.db_path
+    try:
+        with EventStore(db_path) as write_store:
+            for tune_id in applied_ids:
+                write_store.update_pending_tune_status(tune_id, "applied")
+    except Exception:
+        console.print(
+            "[dim]Could not mark items as applied in DB "
+            "(agentmon may hold the lock)[/dim]"
+        )
+
+
 if __name__ == "__main__":
     main()
