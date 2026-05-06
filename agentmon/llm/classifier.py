@@ -115,6 +115,7 @@ class DomainCategory(Enum):
     CDN = "cdn"
     CLOUD_PROVIDER = "cloud_provider"
     API_SERVICE = "api_service"
+    INFRASTRUCTURE_NOISE = "infrastructure_noise"
     SUSPICIOUS = "suspicious"
     LIKELY_MALICIOUS = "likely_malicious"
     DGA = "dga"
@@ -161,6 +162,7 @@ Categories (choose exactly ONE):
 - cdn: Content delivery network
 - cloud_provider: Cloud infrastructure (AWS, Azure, GCP, etc.)
 - api_service: Known API endpoint for legitimate services
+- infrastructure_noise: Network infrastructure probes, connectivity checks, captive portal detection, reserved TLDs (.invalid, .test, .example per RFC 6761), WPAD discovery, or other non-service automated network traffic. Includes UUID-style or random-looking subdomains when they appear under infrastructure/reserved domains
 - suspicious: Unusual but not clearly malicious
 - likely_malicious: Shows signs of malware, phishing, or C2
 - dga: Appears to be algorithmically generated (random-looking)

@@ -25,7 +25,7 @@ DEFAULT_DEDUP_WINDOW = 3600  # 1 hour (raised from 10min to suppress repeat aler
 DEFAULT_DEDUP_CACHE_SIZE = 5000
 
 # Categories considered "benign" for severity downgrade purposes
-BENIGN_CATEGORIES = {"benign", "cdn", "cloud_provider", "api_service"}
+BENIGN_CATEGORIES = {"benign", "cdn", "cloud_provider", "api_service", "infrastructure_noise"}
 NOISE_CATEGORIES = {"advertising", "tracking"}
 
 
@@ -55,6 +55,7 @@ class AnalyzerConfig:
         ".internal",
         ".localdomain",
         ".arpa",  # Reverse DNS
+        ".invalid",  # IANA-reserved (RFC 6761), captive portal probes
     ])
 
     # LLM classification settings (uses Ollama, two-tier)

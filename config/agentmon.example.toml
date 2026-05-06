@@ -213,6 +213,7 @@ ignore_suffixes = [
     ".internal",
     ".localdomain",
     ".arpa",
+    ".invalid",  # IANA-reserved (RFC 6761), captive portal probes
 ]
 
 [llm]
@@ -233,7 +234,7 @@ escalation_confidence_threshold = 0.7
 
 # Downgrade alert severity when LLM classifies domain as benign
 # Reduces false positives from heuristic detection (DGA, known-bad patterns)
-# Categories: benign/cdn/cloud_provider/api_service → INFO
+# Categories: benign/cdn/cloud_provider/api_service/infrastructure_noise → INFO
 #             advertising/tracking → LOW
 downgrade_enabled = true
 downgrade_confidence = 0.8  # Minimum confidence to trust downgrade

@@ -28,7 +28,11 @@ LLM_SYSTEM_PROMPT = (
     "1. Domains that should be allowlisted (clearly benign but frequently alerting)\n"
     "2. Patterns that need tuning (too broad or too narrow)\n"
     "3. Blind spots to investigate (high-traffic domains never flagged)\n"
-    "4. General rule health observations\n\n"
+    "4. Classifier guidance gaps: if alert patterns suggest the triage/escalation LLM is "
+    "systematically misclassifying a class of domains (e.g., infrastructure probes as DGA, "
+    "reserved TLDs as suspicious), recommend what the classification prompt should be taught "
+    "rather than just allowlisting individual domains\n"
+    "5. General rule health observations\n\n"
     "Be specific: name domains, analyzers, and thresholds. Keep your response under 500 words."
 )
 

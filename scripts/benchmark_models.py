@@ -57,6 +57,11 @@ BENCHMARK_DOMAINS = [
     ("api.stripe.com", "api_service", "Payment API"),
     ("api.twilio.com", "api_service", "Communication API"),
 
+    # Infrastructure noise
+    ("f47ac10b-58cc-4372-a567-0e02b2c3d479.invalid",
+     "infrastructure_noise", "Captive portal probe"),
+    ("wpad.example.com", "infrastructure_noise", "WPAD auto-discovery"),
+
     # DGA-like (algorithmically generated)
     ("xj3k9f2m1p.xyz", "dga", "Random characters"),
     ("a1b2c3d4e5f6g7h8.net", "dga", "Alternating pattern"),
@@ -82,6 +87,7 @@ ACCEPTABLE_ALTERNATIVES = {
     "dga": {"suspicious", "likely_malicious"},
     "cloud_provider": {"api_service", "cdn"},
     "api_service": {"cloud_provider"},
+    "infrastructure_noise": {"benign"},
 }
 
 
@@ -97,6 +103,7 @@ def classify_with_model(model: str, domain: str, client: str = "192.168.1.100") 
         client=client,
         query_type="A",
         blocked="no",
+        vt_context="",
     )
 
     start = time.monotonic()

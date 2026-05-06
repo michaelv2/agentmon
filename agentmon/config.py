@@ -73,7 +73,8 @@ class Config:
     known_bad_patterns: list[str] = field(default_factory=list)
     allowlist: set[str] = field(default_factory=set)
     ignore_suffixes: list[str] = field(default_factory=lambda: [
-        ".local", ".lan", ".home", ".internal", ".localdomain", ".arpa"
+        ".local", ".lan", ".home", ".internal", ".localdomain", ".arpa",
+        ".invalid",  # IANA-reserved, used for captive portal / connectivity probes
     ])
     alert_dedup_window: int = 3600  # 1 hour
     alert_dedup_cache_size: int = 5000
