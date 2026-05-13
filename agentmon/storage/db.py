@@ -928,8 +928,13 @@ class EventStore:
     # Pending Tune Action Methods
     # =========================================================================
 
-    def insert_pending_tune(self, action: dict) -> str:
-        """Insert a pending tune action.
+    def insert_pending_tune(self, action: dict) -> str | None:
+        """Insert a pending tune action, skipping duplicates.
+
+        A duplicate is an existing pending row with the same tune_action
+        and tune_value.  Approved/rejected rows are not considered
+        duplicates so the watchdog can re-suggest previously rejected
+        tunes if conditions change.
 
         Args:
             action: Dict with id, timestamp, cycle_number, tune_action,
@@ -937,8 +942,16 @@ class EventStore:
                 confidence, status.
 
         Returns:
-            The tune action ID.
+            The tune action ID, or None if a duplicate already exists.
         """
+        existing = self.conn.execute("""
+            SELECT id FROM pending_tune_actions
+            WHERE tune_action = ? AND tune_value = ? AND status = 'pending'
+            LIMIT 1
+        """, [action["tune_action"], action["tune_value"]]).fetchone()
+        if existing:
+            return None
+
         self.conn.execute("""
             INSERT INTO pending_tune_actions (
                 id, timestamp, cycle_number, tune_action, tune_value,

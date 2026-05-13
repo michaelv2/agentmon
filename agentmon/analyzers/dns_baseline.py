@@ -393,10 +393,18 @@ class DNSBaselineAnalyzer:
 
         feed_match = self._threat_feed_manager.check_domain(domain_lower)
         if feed_match:
+            # Downgrade trusted infrastructure (GitHub, Discord CDN, etc.)
+            # — feed match is noise from shared hosting, not a real indicator.
+            if is_trusted_infrastructure(domain_lower, self._trusted_infra):
+                severity = Severity.INFO
+                confidence = 0.3
+            else:
+                severity = Severity.HIGH
+                confidence = 0.90
             return Alert(
                 id=str(uuid.uuid4()),
                 timestamp=event.timestamp,
-                severity=Severity.HIGH,
+                severity=severity,
                 title="Domain in threat intelligence feed",
                 description=(
                     f"Client {event.client} queried domain '{event.domain}' "
@@ -406,7 +414,7 @@ class DNSBaselineAnalyzer:
                 client=event.client,
                 domain=event.domain,
                 analyzer="dns_baseline.threat_feed",
-                confidence=0.90,
+                confidence=confidence,
                 tags=["threat_feed", "external_intel"],
             )
         return None

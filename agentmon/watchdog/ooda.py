@@ -74,6 +74,10 @@ domain to the allowlist or a malicious pattern to known_bad_patterns)
 - Review recent_alerts for likely false positives from other analyzers. If a flagged domain \
 is clearly benign (e.g., a well-known service's CDN or API subdomain), recommend "tune" with \
 tune_action "add_allowlist" and an appropriate wildcard pattern (e.g., "*.netflix.com")
+- Do NOT suggest allowlisting domains where query-rate or volume anomalies are the primary \
+detection value. A trusted vendor endpoint (e.g., api.anthropic.com, api.openai.com) queried \
+at unusual rates or from unexpected clients is a meaningful signal — rogue agents or compromised \
+software hitting a legitimate API should not go unnoticed simply because the vendor is trusted
 - Consider time of day, query volumes, domain diversity, and client behavior
 - Be specific about what pattern triggered the concern
 - You are aware of your own operational cost (shown below) — be efficient
@@ -158,25 +162,42 @@ class OODAWatchdog:
         return report
 
     def _observe(self) -> OODASnapshot:
-        """Observe phase: query DuckDB for traffic snapshot."""
-        conn = self.store.conn
-        window = self.window_minutes
+        """Observe phase: query DuckDB for traffic snapshot.
 
-        activity = get_recent_activity_snapshot(conn, window)
-        top_clients = get_top_clients_recent(conn, window)
-        top_domains = get_top_domains_recent(conn, window)
-        recent_alerts = get_recent_alerts_summary(conn, window)
-        new_domains = get_new_domains_count(conn, window)
+        Uses a separate read-only connection (temp-copy) to avoid racing
+        with the main event-loop's write connection, since run_cycle
+        executes in a thread-pool executor.
+        """
+        # In-memory DBs (tests) can't be copied; reuse the existing conn.
+        if self.store.db_path == Path(":memory:"):
+            conn = self.store.conn
+            read_store = None
+        else:
+            read_store = EventStore(self.store.db_path, read_only=True)
+            read_store.connect()
+            conn = read_store.conn
 
-        return OODASnapshot(
-            total_queries=activity["total_queries"],
-            unique_domains=activity["unique_domains"],
-            new_domains_count=new_domains,
-            blocked_count=activity["blocked_count"],
-            top_clients=top_clients,
-            top_domains=top_domains,
-            recent_alerts=recent_alerts,
-        )
+        try:
+            window = self.window_minutes
+
+            activity = get_recent_activity_snapshot(conn, window)
+            top_clients = get_top_clients_recent(conn, window)
+            top_domains = get_top_domains_recent(conn, window)
+            recent_alerts = get_recent_alerts_summary(conn, window)
+            new_domains = get_new_domains_count(conn, window)
+
+            return OODASnapshot(
+                total_queries=activity["total_queries"],
+                unique_domains=activity["unique_domains"],
+                new_domains_count=new_domains,
+                blocked_count=activity["blocked_count"],
+                top_clients=top_clients,
+                top_domains=top_domains,
+                recent_alerts=recent_alerts,
+            )
+        finally:
+            if read_store is not None:
+                read_store.close()
 
     def _orient_and_decide(
         self, snapshot: OODASnapshot
@@ -518,7 +539,7 @@ class OODAWatchdog:
 
         # Queue for human approval instead of applying directly
         try:
-            self.store.insert_pending_tune({
+            tune_id = self.store.insert_pending_tune({
                 "id": str(uuid.uuid4()),
                 "timestamp": datetime.now(UTC).isoformat(),
                 "cycle_number": self._cycle_number,
@@ -532,6 +553,14 @@ class OODAWatchdog:
             })
         except Exception as e:
             logger.warning("Failed to queue tune action: %s", e)
+            return None
+
+        if tune_id is None:
+            logger.debug(
+                "Watchdog tune already pending, skipping duplicate: %s = %r",
+                concern.tune_action,
+                concern.tune_value,
+            )
             return None
 
         logger.info(
