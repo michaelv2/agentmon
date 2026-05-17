@@ -13,10 +13,14 @@ import asyncio
 import json
 import logging
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+
+import duckdb
 
 from agentmon.llm.anthropic_client import AnthropicClient, CompletionResult
 from agentmon.models import Alert, Severity
@@ -118,23 +122,41 @@ class OODAWatchdog:
         self._metrics = SelfAwarenessMetrics()
         self._running = False
 
-    def run_cycle(self) -> WatchdogReport:
-        """Execute one complete OODA cycle.
+    def _read_and_analyze(
+        self,
+    ) -> tuple[OODASnapshot, list[OODAConcern], str | None, float]:
+        """Observe + orient/decide without DB writes (thread-safe).
+
+        Used by run_periodic in a thread-pool executor.  DB writes
+        (_act, _store_observation) happen back on the event-loop thread
+        where self.store.conn is safe to use.
 
         Returns:
-            WatchdogReport with snapshot, concerns, and action taken.
+            (snapshot, concerns, raw_response, latency_ms)
         """
         self._cycle_number += 1
         cycle = self._cycle_number
 
-        # === OBSERVE ===
         snapshot = self._observe()
 
-        # Short-circuit: skip LLM if no traffic
         if snapshot.total_queries == 0:
             logger.debug(f"Watchdog cycle {cycle}: no traffic, skipping LLM")
+            return snapshot, [], None, 0.0
+
+        concerns, raw_response, latency_ms = self._orient_and_decide(snapshot)
+        return snapshot, concerns, raw_response, latency_ms
+
+    def run_cycle(self) -> WatchdogReport:
+        """Execute one complete OODA cycle (reads, LLM, writes).
+
+        Not thread-safe — use _read_and_analyze from thread-pool
+        executors instead (run_periodic does this automatically).
+        """
+        snapshot, concerns, raw_response, latency_ms = self._read_and_analyze()
+
+        if snapshot.total_queries == 0:
             report = WatchdogReport(
-                cycle_number=cycle,
+                cycle_number=self._cycle_number,
                 snapshot=snapshot,
                 concerns=[],
                 action_taken="skipped_no_traffic",
@@ -142,40 +164,34 @@ class OODAWatchdog:
             self._store_observation(report)
             return report
 
-        # === ORIENT + DECIDE ===
-        concerns, raw_response, latency_ms = self._orient_and_decide(snapshot)
-
-        # === ACT ===
         action = self._act(concerns)
-
         report = WatchdogReport(
-            cycle_number=cycle,
+            cycle_number=self._cycle_number,
             snapshot=snapshot,
             concerns=concerns,
             raw_llm_response=raw_response,
             action_taken=action,
         )
-
-        # Store audit record
         self._store_observation(report, latency_ms=latency_ms)
-
         return report
 
     def _observe(self) -> OODASnapshot:
         """Observe phase: query DuckDB for traffic snapshot.
 
-        Uses a separate read-only connection (temp-copy) to avoid racing
-        with the main event-loop's write connection, since run_cycle
-        executes in a thread-pool executor.
+        Copies .db + .wal to a temp directory so the snapshot includes
+        un-checkpointed WAL data and avoids contention with the writer.
         """
-        # In-memory DBs (tests) can't be copied; reuse the existing conn.
         if self.store.db_path == Path(":memory:"):
             conn = self.store.conn
-            read_store = None
+            temp_dir = None
         else:
-            read_store = EventStore(self.store.db_path, read_only=True)
-            read_store.connect()
-            conn = read_store.conn
+            temp_dir = tempfile.mkdtemp(prefix="agentmon_watchdog_")
+            temp_db = Path(temp_dir) / "events.db"
+            shutil.copy2(self.store.db_path, temp_db)
+            wal_path = Path(f"{self.store.db_path}.wal")
+            if wal_path.exists():
+                shutil.copy2(wal_path, Path(temp_dir) / "events.db.wal")
+            conn = duckdb.connect(str(temp_db), read_only=True)
 
         try:
             window = self.window_minutes
@@ -196,8 +212,9 @@ class OODAWatchdog:
                 recent_alerts=recent_alerts,
             )
         finally:
-            if read_store is not None:
-                read_store.close()
+            if temp_dir is not None:
+                conn.close()
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _orient_and_decide(
         self, snapshot: OODASnapshot
@@ -637,10 +654,36 @@ class OODAWatchdog:
 
         while self._running:
             try:
-                report = await loop.run_in_executor(None, self.run_cycle)
+                # Read + LLM in thread pool (no DB writes)
+                snapshot, concerns, raw_response, latency_ms = (
+                    await loop.run_in_executor(None, self._read_and_analyze)
+                )
+
+                # Write operations on the event-loop thread where
+                # self.store.conn is safe to use.
+                if snapshot.total_queries == 0:
+                    report = WatchdogReport(
+                        cycle_number=self._cycle_number,
+                        snapshot=snapshot,
+                        concerns=[],
+                        action_taken="skipped_no_traffic",
+                    )
+                    self._store_observation(report)
+                else:
+                    action = self._act(concerns)
+                    report = WatchdogReport(
+                        cycle_number=self._cycle_number,
+                        snapshot=snapshot,
+                        concerns=concerns,
+                        raw_llm_response=raw_response,
+                        action_taken=action,
+                    )
+                    self._store_observation(report, latency_ms=latency_ms)
+
                 concern_count = len(report.concerns)
                 action_count = sum(
-                    1 for c in report.concerns
+                    1
+                    for c in report.concerns
                     if c.recommended_action in ("alert", "investigate")
                 )
                 logger.info(
